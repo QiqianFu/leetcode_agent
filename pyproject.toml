@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leetcode-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "typer[all]>=0.9",
+    "rich>=13.0",
+    "openai>=1.0",
+    "httpx>=0.25",
+    "python-dotenv>=1.0",
+    "prompt_toolkit>=3.0",
+]
+
+[project.scripts]
+leetcode = "lc.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
