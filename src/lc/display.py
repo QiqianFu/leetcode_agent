@@ -80,18 +80,23 @@ def show_status(stats: dict, weak_tags: list[TagStat]) -> None:
     avg = stats["avg_rating"]
     pending = stats["pending_reviews"]
 
+    recent_7d = stats.get("recent_7d", 0)
+    streak = stats.get("streak", 0)
+
     summary = (
         f"已做题目: [bold cyan]{total}[/bold cyan]  "
         f"([green]Easy {by_diff.get('Easy', 0)}[/green] | "
         f"[yellow]Medium {by_diff.get('Medium', 0)}[/yellow] | "
         f"[red]Hard {by_diff.get('Hard', 0)}[/red])\n"
         f"平均评分: [bold]{avg:.1f}[/bold] / 5\n"
+        f"最近 7 天: [bold cyan]{recent_7d}[/bold cyan] 题  "
+        f"连续刷题: [bold cyan]{streak}[/bold cyan] 天\n"
         f"待复习: [bold yellow]{pending}[/bold yellow] 题"
     )
     console.print(Panel(summary, title="刷题统计", border_style="blue"))
 
     if weak_tags:
-        table = Table(title="薄弱标签 (评分越高越薄弱)", border_style="red")
+        table = Table(title="薄弱标签（按难度排序）", border_style="red")
         table.add_column("标签", style="white")
         table.add_column("做题数", style="cyan", justify="right")
         table.add_column("平均评分", style="yellow", justify="right")

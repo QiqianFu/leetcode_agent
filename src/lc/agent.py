@@ -37,11 +37,13 @@ SYSTEM_PROMPT = """\
 - 不要做多余的 double check，用户既然说了就是确定了。
 
 使用工具的时机：
-- 用户想看代码/要提示/要讲解 → 先 read_solution 读代码
+- 用户要提示 → 先 read_solution 读代码，然后调 count_hint 记录，再给提示
+- 用户要讲解 → 先 read_solution 读代码，然后调 count_teach 记录，再给讲解
+- 用户想看代码 → read_solution
 - 用户想做某道题 → start_problem
-- 用户说做完了/想提交 → 询问自评分(1-5)后 submit_result
+- 用户说做完了/想提交 → 告诉用户用 /submit 命令
 - 用户要放弃当前题 → 直接 abandon_problem
-- 查看计划/统计/复习/高频 → 对应的 get_ 工具
+- 查看计划/统计/复习/高频 → 告诉用户用斜杠命令：/today, /status, /review, /hot
 
 自评分标准：1=轻松搞定 2=稍有思考 3=想了一阵 4=很吃力 5=没做出来
 
@@ -87,21 +89,6 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "submit_result",
-            "description": "提交当前题目，记录自评分，安排复习",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "rating": {"type": "integer", "description": "自评 1-5"},
-                    "notes": {"type": "string", "description": "备注"},
-                },
-                "required": ["rating"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "abandon_problem",
             "description": "放弃当前题目",
             "parameters": {"type": "object", "properties": {}},
@@ -110,36 +97,26 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_daily_plan",
-            "description": "获取今日刷题计划（复习 + 新题）",
+            "name": "count_hint",
+            "description": "记录一次提示使用（给提示前必须调用）",
             "parameters": {"type": "object", "properties": {}},
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "get_status",
-            "description": "获取刷题统计数据",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_pending_reviews",
-            "description": "获取待复习题目列表",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_hot_problems",
-            "description": "获取目标公司的高频面试题",
+            "name": "count_teach",
+            "description": "记录一次讲解使用（给讲解前必须调用）",
             "parameters": {"type": "object", "properties": {}},
         },
     },
 ]
+
+
+# Tools that don't need an AI follow-up response
+_SELF_CONTAINED_TOOLS = {
+    "write_solution", "abandon_problem",
+}
 
 
 # ─── Terminal helpers ───
@@ -147,12 +124,20 @@ TOOLS = [
 def _flush_stdin():
     """Flush any pending terminal responses (e.g. CPR) from stdin."""
     import sys
-    import select
-    try:
-        while select.select([sys.stdin], [], [], 0)[0]:
-            sys.stdin.read(1)
-    except Exception:
-        pass
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getch()
+        except Exception:
+            pass
+    else:
+        import select
+        try:
+            while select.select([sys.stdin], [], [], 0)[0]:
+                sys.stdin.read(1)
+        except Exception:
+            pass
 
 
 # ─── Rendering helpers ───
@@ -171,6 +156,8 @@ def _agent_renderable(content: str):
 def _arrow_select(choices: list[tuple[str, any]]) -> any | None:
     """Arrow-key selector using raw terminal input. Returns selected value or None."""
     import sys
+    if sys.platform == "win32":
+        return _arrow_select_windows(choices)
     import tty
     import termios
 
@@ -247,6 +234,24 @@ def _arrow_select(choices: list[tuple[str, any]]) -> any | None:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
+def _arrow_select_windows(choices: list[tuple[str, any]]) -> any | None:
+    """Windows fallback: numbered prompt instead of arrow keys."""
+    import sys
+    for i, (label, _) in enumerate(choices):
+        print(f"  {i + 1}. {label}")
+    print()
+    try:
+        raw = input("  输入编号 (q 跳过): ").strip()
+        if raw.lower() == "q" or not raw:
+            return None
+        idx = int(raw) - 1
+        if 0 <= idx < len(choices):
+            return choices[idx][1]
+    except (ValueError, EOFError):
+        pass
+    return None
+
+
 # ─── File helpers ───
 
 def _slugify(text: str) -> str:
@@ -311,6 +316,67 @@ def _create_solution_file(problem: Problem) -> Path:
     return file_path
 
 
+# ─── Shared actions ───
+
+def submit_current_problem(rating: int, notes: str = None) -> str:
+    """Submit current problem with rating. Used by both Agent and /submit command."""
+    current = state.get_current()
+    if not current:
+        return "当前没有在做题。"
+    if not rating or rating < 1 or rating > 5:
+        return "评分需要在 1-5 之间。"
+
+    pid, aid = current
+    problem = db.get_problem(pid)
+    attempt = db.get_attempt(aid)
+    if not problem or not attempt:
+        return "数据异常。"
+
+    db.finish_attempt(aid, rating, notes)
+    attempt = db.get_attempt(aid)
+
+    from lc.scheduler import handle_review_submit, schedule_review
+
+    active_review = db.get_active_review_for_problem(pid)
+    reviews_scheduled = 0
+
+    if active_review:
+        db.complete_review(active_review.id)
+        new_reviews, should_cancel = handle_review_submit(active_review, rating)
+        if should_cancel:
+            db.cancel_future_reviews(pid)
+        if new_reviews:
+            db.insert_reviews(new_reviews)
+            reviews_scheduled = len(new_reviews)
+    else:
+        reviews = schedule_review(pid, rating, attempt.hints_used, attempt.teach_used)
+        if reviews:
+            db.insert_reviews(reviews)
+            reviews_scheduled = len(reviews)
+
+    db.update_tag_stats(pid)
+
+    started = datetime.fromisoformat(attempt.started_at)
+    elapsed = datetime.utcnow() - started
+    minutes = int(elapsed.total_seconds() // 60)
+    time_str = f"{minutes} 分钟" if minutes > 0 else "< 1 分钟"
+
+    # Save undo info before clearing state
+    fp = state.get_file_path() or ""
+    db.set_session("last_submit", json.dumps({
+        "problem_id": pid,
+        "attempt_id": aid,
+        "rating": rating,
+        "file_path": fp,
+    }))
+
+    state.clear_current()
+
+    from lc.display import show_submit_summary
+    show_submit_summary(problem, rating, reviews_scheduled, time_str)
+    return "已提交。"
+
+
 # ─── Agent ───
 
 class Agent:
@@ -349,9 +415,22 @@ class Agent:
         _flush_stdin()
         self.messages.append({"role": "user", "content": user_input})
 
-        # Keep history manageable
+        # Keep history manageable — find safe truncation point
         if len(self.messages) > 40:
-            self.messages = self.messages[-30:]
+            # Start from position -30 and scan forward to find a safe cut point
+            # (not in the middle of a tool_call/tool_result pair)
+            cut = len(self.messages) - 30
+            while cut < len(self.messages):
+                msg = self.messages[cut]
+                if msg["role"] in ("tool",):
+                    # Don't start with an orphan tool result — move forward
+                    cut += 1
+                elif msg["role"] == "assistant" and msg.get("tool_calls"):
+                    # Don't start with an assistant tool_call without its results
+                    cut += 1
+                else:
+                    break
+            self.messages = self.messages[cut:]
 
         messages = [{"role": "system", "content": self._build_system_prompt()}] + self.messages
 
@@ -379,12 +458,19 @@ class Agent:
             self.messages.append(assistant_msg)
 
             # Execute each tool
+            all_self_contained = True
             for tc in tool_calls:
                 console.print(f"[dim]  ⚙ {tc['name']}[/dim]")
                 result = self._execute_tool(tc["name"], tc["arguments"])
                 tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
                 messages.append(tool_msg)
                 self.messages.append(tool_msg)
+                if tc["name"] not in _SELF_CONTAINED_TOOLS:
+                    all_self_contained = False
+
+            # Self-contained tools don't need AI follow-up
+            if all_self_contained:
+                return
 
     def _call_model(self, messages: list[dict]) -> tuple[str, list[dict]]:
         """Call DeepSeek with streaming. Returns (content, tool_calls)."""
@@ -439,12 +525,9 @@ class Agent:
             "read_solution": lambda: self._tool_read_solution(),
             "write_solution": lambda: self._tool_write_solution(args.get("content", "")),
             "start_problem": lambda: self._tool_start_problem(args.get("problem_id")),
-            "submit_result": lambda: self._tool_submit_result(args.get("rating"), args.get("notes")),
             "abandon_problem": lambda: self._tool_abandon(),
-            "get_daily_plan": lambda: self._tool_get_daily_plan(),
-            "get_status": lambda: self._tool_get_status(),
-            "get_pending_reviews": lambda: self._tool_get_reviews(),
-            "get_hot_problems": lambda: self._tool_get_hot_problems(),
+            "count_hint": lambda: self._tool_count_hint(),
+            "count_teach": lambda: self._tool_count_teach(),
         }
         handler = handlers.get(name)
         if not handler:
@@ -504,172 +587,28 @@ class Agent:
             ensure_ascii=False,
         )
 
-    def _tool_submit_result(self, rating: int, notes: str = None) -> str:
-        current = state.get_current()
-        if not current:
-            return "当前没有在做题。"
-        if not rating or rating < 1 or rating > 5:
-            return "评分需要在 1-5 之间。"
-
-        pid, aid = current
-        problem = db.get_problem(pid)
-        attempt = db.get_attempt(aid)
-        if not problem or not attempt:
-            return "数据异常。"
-
-        db.finish_attempt(aid, rating, notes)
-        attempt = db.get_attempt(aid)
-
-        from lc.scheduler import handle_review_submit, schedule_review
-
-        active_review = db.get_active_review_for_problem(pid)
-        reviews_scheduled = 0
-
-        if active_review:
-            db.complete_review(active_review.id)
-            new_reviews, should_cancel = handle_review_submit(active_review, rating)
-            if should_cancel:
-                db.cancel_future_reviews(pid)
-            if new_reviews:
-                db.insert_reviews(new_reviews)
-                reviews_scheduled = len(new_reviews)
-        else:
-            reviews = schedule_review(pid, rating, attempt.hints_used, attempt.teach_used)
-            if reviews:
-                db.insert_reviews(reviews)
-                reviews_scheduled = len(reviews)
-
-        db.update_tag_stats(pid)
-
-        started = datetime.fromisoformat(attempt.started_at)
-        elapsed = datetime.utcnow() - started
-        minutes = int(elapsed.total_seconds() // 60)
-        time_str = f"{minutes} 分钟" if minutes > 0 else "< 1 分钟"
-
-        state.clear_current()
-
-        return json.dumps(
-            {
-                "status": "submitted",
-                "problem": f"{problem.id}. {problem.title}",
-                "rating": rating,
-                "time": time_str,
-                "reviews_scheduled": reviews_scheduled,
-                "hints_used": attempt.hints_used,
-                "teach_used": attempt.teach_used,
-            },
-            ensure_ascii=False,
-        )
-
     def _tool_abandon(self) -> str:
         current = state.get_current()
         if not current:
             return "当前没有在做题。"
         pid, _ = current
         state.clear_current()
-        console.print(f"[dim]已放弃第 {pid} 题。[/dim]")
-
-        # Offer next problem selection
-        from lc.planner import generate_daily_plan
-        company = db.get_session("cfg_company") or None
-        difficulty = db.get_session("cfg_difficulty") or None
-        plan = generate_daily_plan(company=company, difficulty=difficulty)
-
-        choices: list[tuple[str, Problem]] = []
-        for _, problem in plan.review_problems:
-            choices.append((f"[复习] #{problem.id} {problem.title} ({problem.difficulty})", problem))
-        for problem in plan.new_problems:
-            choices.append((f"[新题] #{problem.id} {problem.title} ({problem.difficulty})", problem))
-
-        if choices:
-            console.print("[dim]选择下一道题：[/dim]")
-            selected = _arrow_select(choices)
-            if selected:
-                return self._tool_start_problem(selected.id)
+        console.print(f"[dim]已放弃第 {pid} 题。输入 /today 选择下一道题。[/dim]")
         return f"已放弃第 {pid} 题。"
 
-    def _tool_get_daily_plan(self) -> str:
-        from lc.planner import generate_daily_plan
-        from lc.display import show_daily_plan
+    def _tool_count_hint(self) -> str:
+        current = state.get_current()
+        if not current:
+            return "当前没有在做题。"
+        _, aid = current
+        db.increment_hints(aid)
+        return "已记录提示。"
 
-        company = db.get_session("cfg_company") or None
-        difficulty = db.get_session("cfg_difficulty") or None
-        plan = generate_daily_plan(company=company, difficulty=difficulty)
+    def _tool_count_teach(self) -> str:
+        current = state.get_current()
+        if not current:
+            return "当前没有在做题。"
+        _, aid = current
+        db.increment_teach(aid)
+        return "已记录讲解。"
 
-        # Show plan with Rich tables
-        show_daily_plan(plan)
-
-        # Collect all problems for selection
-        choices: list[tuple[str, Problem]] = []
-        for _, problem in plan.review_problems:
-            label = f"[复习] #{problem.id} {problem.title} ({problem.difficulty})"
-            choices.append((label, problem))
-        for problem in plan.new_problems:
-            label = f"[新题] #{problem.id} {problem.title} ({problem.difficulty})"
-            choices.append((label, problem))
-
-        if not choices:
-            return "今天没有需要做的题目。"
-
-        selected = _arrow_select(choices)
-        if selected:
-            return self._tool_start_problem(selected.id)
-        return "已显示今日计划。"
-
-    def _tool_get_status(self) -> str:
-        stats = db.get_attempt_stats()
-        weak_tags = db.get_weakest_tags(limit=5)
-        result = {
-            "total_solved": stats["total_solved"],
-            "by_difficulty": stats["by_difficulty"],
-            "avg_rating": round(stats["avg_rating"], 1),
-            "pending_reviews": stats["pending_reviews"],
-            "weak_tags": [
-                {"tag": t.tag, "avg_rating": round(t.avg_rating, 1), "attempts": t.total_attempts}
-                for t in weak_tags
-            ],
-        }
-        return json.dumps(result, ensure_ascii=False)
-
-    def _tool_get_reviews(self) -> str:
-        pending = db.get_pending_reviews()
-        result = []
-        for r in pending:
-            problem = db.get_problem(r.problem_id)
-            if problem:
-                result.append(
-                    {
-                        "id": problem.id,
-                        "title": problem.title,
-                        "difficulty": problem.difficulty,
-                        "interval_days": r.interval_days,
-                        "due_date": r.due_date,
-                    }
-                )
-        if not result:
-            return "没有待复习的题目。"
-        return json.dumps(result, ensure_ascii=False)
-
-    def _tool_get_hot_problems(self) -> str:
-        from lc.codetop_api import fetch_hot_problems
-
-        company = db.get_session("cfg_company") or None
-        problems, total = fetch_hot_problems(company=company, page=1)
-        if not problems:
-            return "暂无数据。请先用 /config 设置公司。"
-        solved_ids = db.get_solved_problem_ids()
-        result = []
-        for p in problems[:15]:
-            result.append(
-                {
-                    "id": p.leetcode_id,
-                    "title": p.title,
-                    "difficulty": p.difficulty,
-                    "frequency": p.frequency,
-                    "solved": p.leetcode_id in solved_ids,
-                }
-            )
-        return json.dumps(
-            {"company": company or "全部", "total": total, "problems": result},
-            ensure_ascii=False,
-        )

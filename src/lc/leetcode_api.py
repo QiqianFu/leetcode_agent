@@ -73,27 +73,13 @@ def _graphql(query: str, variables: dict, retries: int = 2) -> dict:
                 time.sleep(1)
                 continue
             raise
-    return {}
+    raise ConnectionError("LeetCode API 请求失败，请检查网络连接后重试。")
 
 
 def _html_to_text(html: str) -> str:
-    """Simple HTML to markdown-ish text conversion."""
-    text = html
-    text = re.sub(r"<pre>(.*?)</pre>", r"```\n\1\n```", text, flags=re.DOTALL)
-    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text)
-    text = re.sub(r"<strong>(.*?)</strong>", r"**\1**", text)
-    text = re.sub(r"<em>(.*?)</em>", r"*\1*", text)
-    text = re.sub(r"<li>", "- ", text)
-    text = re.sub(r"<p>", "\n", text)
-    text = re.sub(r"<br\s*/?>", "\n", text)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"&lt;", "<", text)
-    text = re.sub(r"&gt;", ">", text)
-    text = re.sub(r"&amp;", "&", text)
-    text = re.sub(r"&quot;", '"', text)
-    text = re.sub(r"&#39;", "'", text)
-    text = re.sub(r"&#\d+;", lambda m: chr(int(m.group(0)[2:-1])), text)
+    """Convert HTML to markdown using markdownify."""
+    from markdownify import markdownify as md
+    text = md(html, heading_style="ATX", bullets="-")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -139,6 +125,31 @@ def fetch_problem(problem_id: int) -> Problem:
         difficulty=q["difficulty"],
         description=description,
         ac_rate=match.get("acRate"),
+        tags=tags,
+        code_snippet=code_snippet,
+    )
+
+
+def fetch_problem_by_slug(title_slug: str) -> Problem:
+    """Fetch a problem by its title slug."""
+    detail_data = _graphql(PROBLEM_DETAIL_QUERY, {"titleSlug": title_slug})
+    q = detail_data["question"]
+
+    description = _html_to_text(q.get("content") or "")
+    tags = [t["name"] for t in q.get("topicTags", [])]
+
+    code_snippet = ""
+    for snippet in q.get("codeSnippets") or []:
+        if snippet.get("langSlug") == "python3":
+            code_snippet = snippet.get("code", "")
+            break
+
+    return Problem(
+        id=int(q["questionFrontendId"]),
+        title=q["title"],
+        title_slug=q["titleSlug"],
+        difficulty=q["difficulty"],
+        description=description,
         tags=tags,
         code_snippet=code_snippet,
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from lc.config import DB_PATH
@@ -20,27 +20,28 @@ def get_connection() -> sqlite3.Connection:
     return _conn
 
 
-def init_db() -> None:
-    conn = get_connection()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS problems (
+SCHEMA_VERSION = 2
+
+# Each migration is a list of SQL statements to run.
+# Index 0 = migration from version 0 to 1 (initial schema), etc.
+_MIGRATIONS = [
+    # v0 → v1: initial schema
+    [
+        """CREATE TABLE IF NOT EXISTS problems (
             id            INTEGER PRIMARY KEY,
             title         TEXT NOT NULL,
             title_slug    TEXT NOT NULL UNIQUE,
             difficulty    TEXT NOT NULL CHECK(difficulty IN ('Easy','Medium','Hard')),
             description   TEXT,
             ac_rate       REAL,
-            code_snippet  TEXT DEFAULT '',
             fetched_at    TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS problem_tags (
+        )""",
+        """CREATE TABLE IF NOT EXISTS problem_tags (
             problem_id    INTEGER NOT NULL REFERENCES problems(id),
             tag           TEXT NOT NULL,
             PRIMARY KEY (problem_id, tag)
-        );
-
-        CREATE TABLE IF NOT EXISTS attempts (
+        )""",
+        """CREATE TABLE IF NOT EXISTS attempts (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             problem_id    INTEGER NOT NULL REFERENCES problems(id),
             started_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -49,43 +50,79 @@ def init_db() -> None:
             hints_used    INTEGER NOT NULL DEFAULT 0,
             teach_used    INTEGER NOT NULL DEFAULT 0,
             notes         TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS reviews (
+        )""",
+        """CREATE TABLE IF NOT EXISTS reviews (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             problem_id    INTEGER NOT NULL REFERENCES problems(id),
             due_date      TEXT NOT NULL,
             interval_days INTEGER NOT NULL,
             completed     INTEGER NOT NULL DEFAULT 0,
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS tag_stats (
+        )""",
+        """CREATE TABLE IF NOT EXISTS tag_stats (
             tag           TEXT PRIMARY KEY,
             total_attempts INTEGER NOT NULL DEFAULT 0,
             avg_rating    REAL NOT NULL DEFAULT 0,
             last_practiced TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS session (
+        )""",
+        """CREATE TABLE IF NOT EXISTS session (
             key           TEXT PRIMARY KEY,
             value         TEXT
-        );
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_reviews_due ON reviews(due_date) WHERE completed = 0",
+        "CREATE INDEX IF NOT EXISTS idx_attempts_problem ON attempts(problem_id)",
+        "CREATE INDEX IF NOT EXISTS idx_problem_tags_tag ON problem_tags(tag)",
+    ],
+    # v1 → v2: add code_snippet column
+    [
+        "ALTER TABLE problems ADD COLUMN code_snippet TEXT DEFAULT ''",
+    ],
+]
 
-        CREATE INDEX IF NOT EXISTS idx_reviews_due
-            ON reviews(due_date) WHERE completed = 0;
-        CREATE INDEX IF NOT EXISTS idx_attempts_problem
-            ON attempts(problem_id);
-        CREATE INDEX IF NOT EXISTS idx_problem_tags_tag
-            ON problem_tags(tag);
+
+def _get_schema_version(conn: sqlite3.Connection) -> int:
+    """Get current schema version, 0 if no schema_version table exists."""
+    try:
+        row = conn.execute("SELECT version FROM schema_version").fetchone()
+        return row["version"] if row else 0
+    except sqlite3.OperationalError:
+        # Table doesn't exist — check if this is a fresh DB or pre-versioning DB
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "problems" in tables:
+            # Pre-versioning DB: already has tables, figure out version
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(problems)").fetchall()}
+            return 2 if "code_snippet" in cols else 1
+        return 0
+
+
+def init_db() -> None:
+    conn = get_connection()
+
+    # Create version tracking table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER NOT NULL
+        )
     """)
     conn.commit()
 
-    # Migration: add code_snippet column if missing (for existing DBs)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(problems)").fetchall()}
-    if "code_snippet" not in cols:
-        conn.execute("ALTER TABLE problems ADD COLUMN code_snippet TEXT DEFAULT ''")
+    current = _get_schema_version(conn)
+
+    # Run pending migrations
+    for i in range(current, SCHEMA_VERSION):
+        for sql in _MIGRATIONS[i]:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # e.g. column already exists
         conn.commit()
+
+    # Update version
+    conn.execute("DELETE FROM schema_version")
+    conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+    conn.commit()
 
 
 # --------------- problems ---------------
@@ -152,6 +189,26 @@ def finish_attempt(attempt_id: int, self_rating: int, notes: str | None = None) 
         """UPDATE attempts SET finished_at = datetime('now'),
            self_rating = ?, notes = ? WHERE id = ?""",
         (self_rating, notes, attempt_id),
+    )
+    conn.commit()
+
+
+def undo_finish_attempt(attempt_id: int) -> None:
+    """Revert a finished attempt back to in-progress state."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE attempts SET finished_at = NULL, self_rating = NULL, notes = NULL WHERE id = ?",
+        (attempt_id,),
+    )
+    conn.commit()
+
+
+def delete_reviews_for_attempt(problem_id: int, after_time: str) -> None:
+    """Delete reviews created after a given time for a problem."""
+    conn = get_connection()
+    conn.execute(
+        "DELETE FROM reviews WHERE problem_id = ? AND created_at >= ?",
+        (problem_id, after_time),
     )
     conn.commit()
 
@@ -314,11 +371,35 @@ def get_attempt_stats() -> dict:
         "SELECT COUNT(*) as cnt FROM reviews WHERE completed = 0 AND due_date <= ?",
         (date.today().isoformat(),),
     ).fetchone()["cnt"]
+    # Recent 7 days
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+    recent_7d = conn.execute(
+        "SELECT COUNT(DISTINCT problem_id) as cnt FROM attempts WHERE self_rating IS NOT NULL AND started_at >= ?",
+        (week_ago,),
+    ).fetchone()["cnt"]
+
+    # Streak: consecutive days with at least one completed attempt
+    streak_rows = conn.execute(
+        """SELECT DISTINCT date(started_at) as d FROM attempts
+           WHERE self_rating IS NOT NULL ORDER BY d DESC"""
+    ).fetchall()
+    streak = 0
+    expected = date.today()
+    for row in streak_rows:
+        d = date.fromisoformat(row["d"])
+        if d == expected:
+            streak += 1
+            expected = expected - timedelta(days=1)
+        elif d < expected:
+            break
+
     return {
         "total_solved": total,
         "by_difficulty": {r["difficulty"]: r["cnt"] for r in by_diff},
         "avg_rating": avg or 0,
         "pending_reviews": pending,
+        "recent_7d": recent_7d,
+        "streak": streak,
     }
 
 

@@ -43,3 +43,38 @@ cp .env.example .env  # 填入 DEEPSEEK_API_KEY
 - score < 3 → 3, 14 天
 
 复习时：评 1-2 取消后续复习，评 4-5 加 +1 天复习
+
+## TODO（剩余）
+
+- **slash 命令输出风格统一** — AI 回复有 ⏺ 前缀，slash 命令输出也应有统一的视觉分隔
+
+## 已完成
+
+### 交互优化
+- [x] 提交流程跳过 AI — `/submit` + 箭头选择器
+- [x] /review、/hot 加箭头选择
+- [x] 做题状态 prompt（`146 LRU Cache > `）
+- [x] 消息截断保持 tool_call/tool_result 配对完整
+- [x] 放弃后不弹选题，只提示 /today
+- [x] /info 命令（题目、用时、提示次数）
+- [x] Ctrl+C 做题中确认
+- [x] 空输入微提示
+- [x] /continue 恢复上次未完成的题
+
+### Bug 修复
+- [x] hint/teach 计数器（count_hint / count_teach 工具）
+- [x] LeetCode API 静默失败 → raise ConnectionError
+- [x] 薄弱标签标题改为"按难度排序"
+
+### 功能补全
+- [x] /similar 命令（GraphQL 查相似题 + 箭头选择）
+- [x] 清理 ai.py 死代码（整个文件删除）
+- [x] 新题 tag 过滤（planner 现在会 fetch 再过滤）
+- [x] .env.example
+
+### 架构优化
+- [x] HTML → markdownify
+- [x] DB schema 版本管理（schema_version 表 + _MIGRATIONS）
+- [x] /undo 撤回提交
+- [x] 统计面板趋势（最近 7 天 + 连续刷题天数）
+- [x] Windows 兼容（_flush_stdin + _arrow_select_windows）

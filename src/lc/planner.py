@@ -73,15 +73,19 @@ def _pick_from_codetop(
             continue
         if difficulty and cp.difficulty != difficulty:
             continue
-        # Tag filter: need to check against problem_tags in DB or fetch from LeetCode
+        # Tag filter
         if tag:
-            # Check local DB first
             p = db.get_problem(cp.leetcode_id)
-            if p and p.tags:
-                if not any(tag.lower() in t.lower() for t in p.tags):
-                    continue
-            # If not in DB, we trust CodeTop ordering and skip tag filter
-            # (tags will be populated when user does `lc solve`)
+            if not p or not p.tags:
+                # Not in DB — fetch from LeetCode and cache
+                try:
+                    from lc.leetcode_api import fetch_problem
+                    p = fetch_problem(cp.leetcode_id)
+                    db.upsert_problem(p)
+                except Exception:
+                    continue  # Can't verify tag, skip
+            if not any(tag.lower() in t.lower() for t in p.tags):
+                continue
 
         results.append(Problem(
             id=cp.leetcode_id,

@@ -26,3 +26,38 @@ def clear_current() -> None:
     db.delete_session("current_problem_id")
     db.delete_session("current_attempt_id")
     db.delete_session("current_file_path")
+    db.delete_session("suspended_problem_id")
+    db.delete_session("suspended_attempt_id")
+    db.delete_session("suspended_file_path")
+
+
+def suspend_current() -> None:
+    """Move current state to suspended — get_current() will return None."""
+    pid = db.get_session("current_problem_id")
+    aid = db.get_session("current_attempt_id")
+    fp = db.get_session("current_file_path")
+    if pid and aid:
+        db.set_session("suspended_problem_id", pid)
+        db.set_session("suspended_attempt_id", aid)
+        if fp:
+            db.set_session("suspended_file_path", fp)
+        db.delete_session("current_problem_id")
+        db.delete_session("current_attempt_id")
+        db.delete_session("current_file_path")
+
+
+def resume_current() -> tuple[int, int] | None:
+    """Restore suspended state back to current. Returns (pid, aid) or None."""
+    pid = db.get_session("suspended_problem_id")
+    aid = db.get_session("suspended_attempt_id")
+    fp = db.get_session("suspended_file_path")
+    if pid and aid:
+        db.set_session("current_problem_id", pid)
+        db.set_session("current_attempt_id", aid)
+        if fp:
+            db.set_session("current_file_path", fp)
+        db.delete_session("suspended_problem_id")
+        db.delete_session("suspended_attempt_id")
+        db.delete_session("suspended_file_path")
+        return int(pid), int(aid)
+    return None
