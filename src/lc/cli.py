@@ -4,7 +4,7 @@ from rich.prompt import Prompt
 from rich.panel import Panel
 
 from lc import db, state
-from lc.display import console, show_companies
+from lc.display import console, show_companies, show_tags
 
 DIFFICULTY_CHOICES = {"easy": "Easy", "medium": "Medium", "hard": "Hard"}
 
@@ -64,11 +64,56 @@ def handle_config() -> None:
         set_config("difficulty", DIFFICULTY_CHOICES[diff])
         console.print(f"[green]难度已设置为: {DIFFICULTY_CHOICES[diff]}[/green]")
 
+    # Mode selection
+    console.print()
+    current_mode = get_config("mode") or "default"
+    mode = Prompt.ask(
+        "刷题模式",
+        choices=["default", "random", "tag"],
+        default=current_mode,
+    )
+    set_config("mode", mode)
+
+    if mode == "tag":
+        from lc.codetop_api import fetch_tags
+        console.print("[dim]正在获取标签列表...[/dim]")
+        tags = fetch_tags()
+        if tags:
+            show_tags(tags)
+        current_tag = get_config("tag") or ""
+        tag_input = Prompt.ask(
+            "目标标签（输入标签名称）",
+            default=current_tag,
+            show_default=bool(current_tag),
+        )
+        if tag_input.strip() and tags:
+            tag_names = [t["name"] for t in tags]
+            if tag_input in tag_names:
+                set_config("tag", tag_input)
+                console.print(f"[green]标签已设置为: {tag_input}[/green]")
+            else:
+                matches = [n for n in tag_names if tag_input.lower() in n.lower()]
+                if matches:
+                    set_config("tag", matches[0])
+                    console.print(f"[green]标签已设置为: {matches[0]}[/green]")
+                else:
+                    console.print(f"[red]未找到「{tag_input}」，标签设置未更改。[/red]")
+        else:
+            console.print("[dim]标签: 跳过[/dim]")
+
+    mode_labels = {"default": "按频率", "random": "随机", "tag": "按标签"}
+    mode_display = mode_labels.get(mode, mode)
+    if mode == "tag":
+        mode_display += f" ({get_config('tag') or '未设置'})"
+    console.print(f"[green]模式已设置为: {mode_display}[/green]")
+
     console.print()
     company_display = get_config("company") or "未设置"
     diff_display = get_config("difficulty") or "不限"
     console.print(Panel(
-        f"公司: [cyan]{company_display}[/cyan]\n难度: [cyan]{diff_display}[/cyan]",
+        f"公司: [cyan]{company_display}[/cyan]\n"
+        f"难度: [cyan]{diff_display}[/cyan]\n"
+        f"模式: [cyan]{mode_display}[/cyan]",
         title="当前设置",
         border_style="blue",
     ))
@@ -79,7 +124,6 @@ def handle_config() -> None:
 
 SLASH_COMMANDS = [
     ("/today",  "今日计划（复习 + 新题）"),
-    ("/continue","继续上次未完成的题"),
     ("/submit", "提交当前题目"),
     ("/info",   "当前做题状态"),
     ("/similar", "相似题目"),
@@ -87,7 +131,7 @@ SLASH_COMMANDS = [
     ("/review", "待复习列表"),
     ("/hot",    "高频面试题"),
     ("/undo",   "撤回上次提交"),
-    ("/config", "设置公司和难度偏好"),
+    ("/config", "设置公司、难度、刷题模式"),
     ("/help",   "显示帮助"),
     ("/quit",   "退出"),
 ]
@@ -95,9 +139,6 @@ SLASH_COMMANDS = [
 HELP_TEXT = """
 [bold]自然语言对话:[/bold]
   "帮我做第 146 题"  "给个提示"  "讲解一下"  "放弃"
-
-[bold]做题管理:[/bold]
-  [cyan]/continue[/cyan] 继续上次未完成的题
 
 [bold]做题中:[/bold]
   [cyan]/submit[/cyan]   提交当前题目
@@ -110,7 +151,7 @@ HELP_TEXT = """
   [cyan]/review[/cyan]  待复习列表
   [cyan]/hot[/cyan]     高频面试题
   [cyan]/undo[/cyan]    撤回上次提交
-  [cyan]/config[/cyan]  设置公司和难度偏好
+  [cyan]/config[/cyan]  设置公司、难度、刷题模式
   [cyan]/help[/cyan]    显示帮助
   [cyan]/quit[/cyan]    退出
 """.strip()
@@ -170,7 +211,7 @@ def _build_prompt_session():
         "scrollbar.background": "noinherit",
         "scrollbar.button": "noinherit",
         "bottom-toolbar": "noreverse noinherit",
-        "bottom-toolbar.text": "ansiblue noinherit",
+        "bottom-toolbar.text": "#000000 noinherit",
     })
 
     # Remove 1-space left padding from completion menu items
@@ -207,13 +248,23 @@ def _build_prompt_session():
 
     # Shift completion menu to start at the beginning of typed text (not cursor)
     from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
-    from prompt_toolkit.layout.containers import Window, HSplit, FloatContainer, ConditionalContainer
+    from prompt_toolkit.layout.containers import (
+        Window,
+        HSplit,
+        Float,
+        FloatContainer,
+        ConditionalContainer,
+    )
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.filters import Condition
     import shutil
 
+    input_window = None
     for window in session.layout.find_all_windows():
         if isinstance(window.content, BufferControl) and window.content.buffer == session.default_buffer:
+            input_window = window
+            window.dont_extend_height = Condition(lambda: True)
+
             def _menu_pos():
                 buf = session.default_buffer
                 if buf.complete_state:
@@ -229,16 +280,18 @@ def _build_prompt_session():
         w = shutil.get_terminal_size().columns
         return [("class:bottom-toolbar.text", "─" * w)]
 
-    sep_window = Window(
-        content=FormattedTextControl(_sep_text), height=1, dont_extend_height=True,
-    )
+    def _should_reserve_menu_space() -> bool:
+        buf = session.default_buffer
+        text = buf.document.text_before_cursor
+        if not text.startswith("/"):
+            return buf.complete_state is not None
+        return buf.complete_while_typing() or buf.complete_state is not None
+
     reserve_window = ConditionalContainer(
         Window(height=Dimension(min=len(SLASH_COMMANDS))),
-        filter=Condition(
-            lambda: session.default_buffer.complete_while_typing()
-            or session.default_buffer.complete_state is not None
-        ),
+        filter=Condition(_should_reserve_menu_space),
     )
+    separator_spacer = Window(height=1, dont_extend_height=True)
 
     # Find the FloatContainer and inject into its content HSplit
     root_hsplit = session.layout.container
@@ -246,12 +299,30 @@ def _build_prompt_session():
         if isinstance(child, FloatContainer):
             content_hsplit = child.content
             children = list(content_hsplit.children)
-            children.append(sep_window)
+            children.append(separator_spacer)
             children.append(reserve_window)
             content_hsplit.children = children
 
+            sep_float = None
+            if input_window is not None:
+                sep_float = Float(
+                    left=0,
+                    right=0,
+                    height=1,
+                    ycursor=True,
+                    attach_to_window=input_window,
+                    content=Window(
+                        content=FormattedTextControl(_sep_text),
+                        height=1,
+                        dont_extend_height=True,
+                    ),
+                )
+                child.floats.append(sep_float)
+
             # Shift completion menu floats down by 1 so they don't cover the separator
             for fl in child.floats:
+                if fl is sep_float:
+                    continue
                 original_content = fl.content
                 fl.content = HSplit([
                     Window(height=1),  # 1-line spacer
@@ -265,56 +336,33 @@ def _build_prompt_session():
 # ─── Welcome & main loop ───
 
 def show_welcome() -> None:
-    current = state.get_current()
-    if current:
-        pid, _ = current
-        problem = db.get_problem(pid)
-        title = f"{problem.title}" if problem else ""
-        console.print(f"\n[dim]有未完成的题: 第 {pid} 题 {title} — 输入 /continue 继续[/dim]\n")
-        # Suspend current state so prompt shows "> " until /continue
-        state.suspend_current()
+    company = get_config("company")
+    difficulty = get_config("difficulty") or "不限"
+    mode = get_config("mode") or "default"
+    mode_labels = {"default": "按频率", "random": "随机", "tag": "按标签"}
+    mode_display = mode_labels.get(mode, mode)
+    if mode == "tag":
+        mode_display += f" ({get_config('tag') or '未设置'})"
+    if company:
+        console.print(f"\n[dim]当前目标: {company} | 难度: {difficulty} | 模式: {mode_display}[/dim]\n")
     else:
-        company = get_config("company")
-        difficulty = get_config("difficulty") or "不限"
-        if company:
-            console.print(f"\n[dim]当前目标: {company} | 难度: {difficulty}[/dim]\n")
-        else:
-            console.print("\n[dim]首次使用？输入 /config 设置目标公司和难度。[/dim]\n")
+        console.print("\n[dim]首次使用？输入 /config 设置目标公司和难度。[/dim]\n")
 
 
-def handle_continue() -> None:
-    # Check if already in a problem
-    current = state.get_current()
-    if current:
-        pid, _ = current
-        problem = db.get_problem(pid)
-        title = f"{problem.title}" if problem else ""
-        console.print(f"[yellow]当前已在做第 {pid} 题 {title}[/yellow]")
-        return
 
-    # Try to resume suspended
-    result = state.resume_current()
-    if result:
-        pid, _ = result
-        problem = db.get_problem(pid)
-        title = f"{problem.title}" if problem else ""
-        fp = state.get_file_path()
-        console.print(f"[green]已恢复: 第 {pid} 题 {title}[/green]")
-        if fp:
-            console.print(f"[dim]解题文件: {fp}[/dim]")
-    else:
-        console.print("[yellow]没有未完成的题目。[/yellow]")
-
-
-def handle_today(agent) -> None:
+def handle_today() -> None:
     """Show daily plan and let user pick a problem."""
     from lc.planner import generate_daily_plan
     from lc.display import show_daily_plan
-    from lc.agent import _arrow_select
+    from lc.agent import _arrow_select, start_problem
 
     company = get_config("company") or None
     difficulty = get_config("difficulty") or None
-    plan = generate_daily_plan(company=company, difficulty=difficulty)
+    mode = get_config("mode") or "default"
+    tag = get_config("tag") if mode == "tag" else None
+    plan = generate_daily_plan(
+        company=company, difficulty=difficulty, tag=tag, randomize=(mode == "random"),
+    )
     show_daily_plan(plan)
 
     choices = []
@@ -326,7 +374,7 @@ def handle_today(agent) -> None:
     if choices:
         selected = _arrow_select(choices)
         if selected:
-            agent._tool_start_problem(selected.id)
+            start_problem(selected.id)
 
 
 def handle_info() -> None:
@@ -404,8 +452,8 @@ def handle_undo() -> None:
     console.print(f"[dim]已恢复做题状态，可以继续或重新 /submit。[/dim]")
 
 
-def handle_similar(agent) -> None:
-    from lc.agent import _arrow_select
+def handle_similar() -> None:
+    from lc.agent import _arrow_select, start_problem
     from lc.display import show_similar
     from lc.leetcode_api import fetch_similar_problems
     from lc.models import Problem
@@ -450,11 +498,10 @@ def handle_similar(agent) -> None:
     if choices:
         selected = _arrow_select(choices)
         if selected:
-            # Need to fetch actual problem ID
             from lc.leetcode_api import fetch_problem_by_slug
             try:
                 full = fetch_problem_by_slug(selected.title_slug)
-                agent._tool_start_problem(full.id)
+                start_problem(full.id)
             except Exception:
                 console.print(f"[dim]请手动开始: 做 {selected.title}[/dim]")
 
@@ -466,9 +513,9 @@ def handle_status() -> None:
     show_status(stats, weak_tags)
 
 
-def handle_review(agent) -> None:
+def handle_review() -> None:
     from lc.display import show_review_list
-    from lc.agent import _arrow_select
+    from lc.agent import _arrow_select, start_problem
 
     pending = db.get_pending_reviews()
     reviews_with_problems = []
@@ -485,7 +532,7 @@ def handle_review(agent) -> None:
         ]
         selected = _arrow_select(choices)
         if selected:
-            agent._tool_start_problem(selected.id)
+            start_problem(selected.id)
 
 
 def handle_submit() -> None:
@@ -518,10 +565,10 @@ def handle_submit() -> None:
     submit_current_problem(rating)
 
 
-def handle_hot(agent) -> None:
+def handle_hot() -> None:
     from lc.codetop_api import fetch_hot_problems
     from lc.display import show_hot_problems
-    from lc.agent import _arrow_select
+    from lc.agent import _arrow_select, start_problem
 
     company = get_config("company") or None
     problems, total = fetch_hot_problems(company=company, page=1)
@@ -539,7 +586,7 @@ def handle_hot(agent) -> None:
     ]
     selected = _arrow_select(choices)
     if selected:
-        agent._tool_start_problem(selected.id)
+        start_problem(selected.id)
 
 
 def _get_prompt() -> str:
@@ -555,6 +602,7 @@ def _get_prompt() -> str:
 def app() -> None:
     """Main REPL entry point."""
     db.init_db()
+    state.clear_current()
 
     from importlib.metadata import version as pkg_version
     from pathlib import Path
@@ -574,13 +622,15 @@ def app() -> None:
     agent = Agent()
     session = _build_prompt_session()
     empty_count = 0
+    ctrl_c_pending = False
 
     while True:
         try:
             prompt_text = _get_prompt()
             w = console.size.width
-            console.print(f"[dim blue]{'─' * w}[/dim blue]")
+            console.print(f"[#000000]{'─' * w}[/#000000]")
             user_input = session.prompt(prompt_text)
+            ctrl_c_pending = False
             text = user_input.strip()
             if not text:
                 empty_count += 1
@@ -601,7 +651,7 @@ def app() -> None:
                 console.print(HELP_TEXT)
                 continue
             if text in ("/today", "/plan"):
-                handle_today(agent)
+                handle_today()
                 continue
             if text in ("/submit", "提交"):
                 handle_submit()
@@ -610,7 +660,7 @@ def app() -> None:
                 handle_info()
                 continue
             if text in ("/similar",):
-                handle_similar(agent)
+                handle_similar()
                 continue
             if text in ("/undo",):
                 handle_undo()
@@ -619,29 +669,22 @@ def app() -> None:
                 handle_status()
                 continue
             if text in ("/review",):
-                handle_review(agent)
+                handle_review()
                 continue
             if text in ("/hot",):
-                handle_hot(agent)
-                continue
-            if text in ("/continue",):
-                handle_continue()
+                handle_hot()
                 continue
 
             # Everything else → agent
             agent.chat(text)
 
         except KeyboardInterrupt:
-            current = state.get_current()
-            if current:
-                pid, _ = current
-                problem = db.get_problem(pid)
-                title = f"{problem.title}" if problem else f"#{pid}"
-                console.print(f"\n[yellow]正在做第 {pid} 题 {title}[/yellow]")
-                console.print("[dim]再按一次 Ctrl+C 退出，输入 /submit 提交，输入 /help 查看帮助[/dim]")
-                continue
-            console.print("\n[dim]再见！[/dim]")
-            break
+            if ctrl_c_pending or not state.get_current():
+                console.print("\n[dim]再见！[/dim]")
+                break
+            ctrl_c_pending = True
+            console.print(f"\n[dim]再按一次 Ctrl+C 退出，输入 /submit 提交[/dim]")
+            continue
         except EOFError:
             break
 

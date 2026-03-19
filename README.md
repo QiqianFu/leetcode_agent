@@ -72,7 +72,15 @@ leetcode
 
 | 指令 | 说明 |
 |------|------|
-| `/config` | 设置目标公司和难度偏好 |
+| `/today` | 今日计划（复习 + 新题） |
+| `/submit` | 提交当前题目 |
+| `/info` | 当前做题状态 |
+| `/similar` | 查找相似题目 |
+| `/status` | 刷题统计 |
+| `/review` | 待复习列表 |
+| `/hot` | 高频面试题 |
+| `/undo` | 撤回上次提交 |
+| `/config` | 设置目标公司、难度、刷题模式 |
 | `/help` | 显示帮助 |
 | `/quit` | 退出 |
 
@@ -110,6 +118,23 @@ leetcode
 ## 数据存储
 
 所有数据存储在 `~/.leetcode_agent/leetcode.db`（SQLite），包括做题记录、复习计划、统计数据。
+
+## 架构
+
+```
+src/lc/
+├── cli.py           — 命令入口 & REPL 主循环
+├── agent.py         — DeepSeek 对话 Agent（function calling）
+├── db.py            — SQLite schema + 数据访问
+├── models.py        — 数据模型（Problem / Attempt 等）
+├── config.py        — 环境变量 & 配置加载
+├── leetcode_api.py  — LeetCode GraphQL 客户端
+├── codetop_api.py   — CodeTop 高频题 API
+├── scheduler.py     — 间隔复习算法
+├── planner.py       — 每日计划生成
+├── display.py       — Rich 渲染
+└── state.py         — 会话状态管理
+```
 
 ## 技术栈
 

@@ -55,6 +55,14 @@ def fetch_companies() -> list[dict]:
     return []
 
 
+def fetch_tags() -> list[dict]:
+    """Return list of {'id': int, 'name': str} from CodeTop tags API."""
+    data = _get("/tags/", {})
+    if isinstance(data, list):
+        return [{"id": t["id"], "name": t["name"]} for t in data]
+    return []
+
+
 def _find_company_id(company_name: str) -> int | None:
     companies = fetch_companies()
     for c in companies:

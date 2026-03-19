@@ -40,8 +40,9 @@ SYSTEM_PROMPT = """\
 - 用户要提示 → 先 read_solution 读代码，然后调 count_hint 记录，再给提示
 - 用户要讲解 → 先 read_solution 读代码，然后调 count_teach 记录，再给讲解
 - 用户想看代码 → read_solution
-- 用户想做某道题 → start_problem
-- 用户说做完了/想提交 → 告诉用户用 /submit 命令
+- 用户想做某道题（给了题号） → start_problem
+- 用户想刷题但没指定题号（如"开始"、"来一道"、"刷题"等） → 直接调 pick_problem，不要反问
+- 用户说做完了/结束/想提交/完成了 → 直接调 finish_problem 触发提交流程
 - 用户要放弃当前题 → 直接 abandon_problem
 - 查看计划/统计/复习/高频 → 告诉用户用斜杠命令：/today, /status, /review, /hot
 
@@ -61,12 +62,12 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "write_solution",
-            "description": "写入用户的解题文件（覆盖全部内容）",
+            "name": "append_solution",
+            "description": "将参考解法追加到用户的解题文件末尾（不会覆盖用户代码）。用户要求看答案、给正确解法时使用。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "description": "完整代码内容"},
+                    "content": {"type": "string", "description": "参考解法代码"},
                 },
                 "required": ["content"],
             },
@@ -75,8 +76,16 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "pick_problem",
+            "description": "根据用户已配置的刷题计划（公司、难度、模式）自动抽题并开始。用户想刷题但没指定题号时调用此工具。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "start_problem",
-            "description": "开始做一道 LeetCode 题，获取题目并创建解题文件",
+            "description": "开始做指定题号的 LeetCode 题（用户明确给了题号时使用）",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -84,6 +93,14 @@ TOOLS = [
                 },
                 "required": ["problem_id"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish_problem",
+            "description": "结束当前题目，触发评分提交流程。用户说做完了、结束、完成了、想提交时调用。",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -115,7 +132,7 @@ TOOLS = [
 
 # Tools that don't need an AI follow-up response
 _SELF_CONTAINED_TOOLS = {
-    "write_solution", "abandon_problem",
+    "abandon_problem", "pick_problem", "finish_problem",
 }
 
 
@@ -261,6 +278,22 @@ def _slugify(text: str) -> str:
     return text
 
 
+def _detect_imports(snippet: str) -> str:
+    """Detect typing and data structure imports needed by the code snippet."""
+    typing_types = ["List", "Optional", "Dict", "Set", "Tuple", "Deque"]
+    needed_typing = [t for t in typing_types if re.search(rf'\b{t}\b', snippet)]
+
+    lines = []
+    if needed_typing:
+        lines.append(f"from typing import {', '.join(needed_typing)}")
+    if "collections." in snippet or re.search(r'\b(deque|defaultdict|Counter|OrderedDict)\b', snippet):
+        lines.append("import collections")
+    if re.search(r'\bheapq\b', snippet):
+        lines.append("import heapq")
+
+    return "\n".join(lines)
+
+
 _DATA_STRUCTURE_TAGS = {
     "array", "string", "hash table", "linked list", "stack", "queue",
     "tree", "binary tree", "binary search tree", "graph", "matrix",
@@ -289,24 +322,19 @@ def _create_solution_file(problem: Problem) -> Path:
 
     lines = [
         f"# {problem.id}. {problem.title}",
-        f"# 难度: {problem.difficulty}",
+        f"# https://leetcode.com/problems/{problem.title_slug}/",
+        "",
     ]
-    if problem.tags:
-        lines.append(f'# 标签: {", ".join(problem.tags)}')
-    lines.append(f"# https://leetcode.com/problems/{problem.title_slug}/")
-    lines.append("#")
 
-    if problem.description:
-        lines.append("# --- 题目描述 ---")
-        for desc_line in problem.description.splitlines():
-            lines.append(f"# {desc_line}")
-        lines.append("#")
-
-    lines.append("")
+    # Auto-detect needed imports from code snippet
+    snippet = problem.code_snippet or ""
+    imports = _detect_imports(snippet)
+    if imports:
+        lines.append(imports)
     lines.append("")
 
-    if problem.code_snippet:
-        lines.append(problem.code_snippet)
+    if snippet:
+        lines.append(snippet)
     else:
         lines.append("class Solution:")
         lines.append("    pass")
@@ -377,6 +405,33 @@ def submit_current_problem(rating: int, notes: str = None) -> str:
     return "已提交。"
 
 
+def start_problem(problem_id: int) -> tuple[Problem, Path] | str:
+    """Start a problem. Returns (problem, rel_path) on success, error str on failure."""
+    state.clear_current()
+
+    problem = db.get_problem(problem_id)
+    if problem is None or problem.description is None:
+        try:
+            from lc.leetcode_api import fetch_problem
+            problem = fetch_problem(problem_id)
+            db.upsert_problem(problem)
+        except Exception as e:
+            return f"获取题目失败: {e}"
+
+    file_path = _create_solution_file(problem)
+    attempt_id = db.create_attempt(problem_id)
+    state.set_current(problem_id, attempt_id, file_path=str(file_path))
+
+    url = f"https://leetcode.com/problems/{problem.title_slug}/"
+    rel_path = file_path.relative_to(Path.cwd())
+    console.print(f"[green]已开始: {problem.id}. {problem.title} ({problem.difficulty})[/green]")
+    console.print(f"[dim]🔗 {url}[/dim]")
+    console.print(f"[dim]📄 {rel_path}[/dim]")
+    console.print(f"[dim]输入「提示」「讲解」获取帮助，/submit 提交，「放弃」跳过[/dim]")
+
+    return problem, rel_path
+
+
 # ─── Agent ───
 
 class Agent:
@@ -386,6 +441,7 @@ class Agent:
             raise SystemExit(1)
         self.client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
         self.messages: list[dict] = []
+        self._pending_clear = False
 
     def _build_system_prompt(self) -> str:
         parts = [SYSTEM_PROMPT]
@@ -406,13 +462,16 @@ class Agent:
                 if problem.description:
                     parts.append(f"\n题目描述:\n{problem.description}")
         else:
-            parts.append("\n当前没有在做题。")
+            parts.append("\n当前没有在做题。用户说开始/刷题等，直接调 pick_problem。")
 
         return "\n".join(parts)
 
     def chat(self, user_input: str):
         """Process user message through the agent loop."""
         _flush_stdin()
+        if self._pending_clear:
+            self.messages.clear()
+            self._pending_clear = False
         self.messages.append({"role": "user", "content": user_input})
 
         # Keep history manageable — find safe truncation point
@@ -523,8 +582,10 @@ class Agent:
         args = json.loads(arguments) if arguments else {}
         handlers = {
             "read_solution": lambda: self._tool_read_solution(),
-            "write_solution": lambda: self._tool_write_solution(args.get("content", "")),
+            "append_solution": lambda: self._tool_append_solution(args.get("content", "")),
+            "pick_problem": lambda: self._tool_pick_problem(),
             "start_problem": lambda: self._tool_start_problem(args.get("problem_id")),
+            "finish_problem": lambda: self._tool_finish_problem(),
             "abandon_problem": lambda: self._tool_abandon(),
             "count_hint": lambda: self._tool_count_hint(),
             "count_teach": lambda: self._tool_count_teach(),
@@ -548,33 +609,40 @@ class Agent:
             return f"文件不存在: {fp}"
         return p.read_text(encoding="utf-8")
 
-    def _tool_write_solution(self, content: str) -> str:
+    def _tool_append_solution(self, content: str) -> str:
         fp = state.get_file_path()
         if not fp:
             return "当前没有解题文件。"
-        Path(fp).write_text(content, encoding="utf-8")
-        return f"已写入 {fp}"
+        p = Path(fp)
+        if not p.exists():
+            return f"文件不存在: {fp}"
+        with p.open("a", encoding="utf-8") as f:
+            f.write("\n\n# ─── 参考解法 ───\n\n")
+            f.write(content)
+            f.write("\n")
+        console.print(f"[dim]参考解法已追加到 {fp}[/dim]")
+        return f"已追加到 {fp}"
 
-    def _tool_start_problem(self, problem_id: int) -> str:
+
+    def _tool_pick_problem(self) -> str:
+        """Auto-pick a problem using handle_today logic."""
+        from lc.cli import handle_today
+        handle_today()
         current = state.get_current()
         if current:
+            self._pending_clear = True
             pid, _ = current
-            return f"你正在做第 {pid} 题，请先提交或放弃。"
+            problem = db.get_problem(pid)
+            if problem:
+                return f"已开始: {problem.id}. {problem.title}"
+        return "未选题。"
 
-        problem = db.get_problem(problem_id)
-        if problem is None or problem.description is None:
-            try:
-                from lc.leetcode_api import fetch_problem
-                problem = fetch_problem(problem_id)
-                db.upsert_problem(problem)
-            except Exception as e:
-                return f"获取题目失败: {e}"
-
-        file_path = _create_solution_file(problem)
-        attempt_id = db.create_attempt(problem_id)
-        state.set_current(problem_id, attempt_id, file_path=str(file_path))
-
-        rel_path = file_path.relative_to(Path.cwd())
+    def _tool_start_problem(self, problem_id: int) -> str:
+        result = start_problem(problem_id)
+        if isinstance(result, str):
+            return result  # error message
+        self._pending_clear = True
+        problem, rel_path = result
         return json.dumps(
             {
                 "status": "started",
@@ -586,6 +654,14 @@ class Agent:
             },
             ensure_ascii=False,
         )
+
+    def _tool_finish_problem(self) -> str:
+        from lc.cli import handle_submit
+        current = state.get_current()
+        if not current:
+            return "当前没有在做题。"
+        handle_submit()
+        return "已完成提交流程。"
 
     def _tool_abandon(self) -> str:
         current = state.get_current()

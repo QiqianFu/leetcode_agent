@@ -139,10 +139,11 @@ def upsert_problem(p: Problem) -> None:
                fetched_at=datetime('now')""",
         (p.id, p.title, p.title_slug, p.difficulty, p.description, p.ac_rate, p.code_snippet),
     )
-    # upsert tags
+    # replace tags
+    conn.execute("DELETE FROM problem_tags WHERE problem_id = ?", (p.id,))
     for tag in p.tags:
         conn.execute(
-            "INSERT OR IGNORE INTO problem_tags (problem_id, tag) VALUES (?, ?)",
+            "INSERT INTO problem_tags (problem_id, tag) VALUES (?, ?)",
             (p.id, tag),
         )
     conn.commit()
@@ -404,7 +405,7 @@ def get_attempt_stats() -> dict:
 
 
 def get_unsolved_by_tags(tags: list[str], limit: int = 5) -> list[Problem]:
-    """Get problems matching given tags that haven't been solved well (rating <= 2)."""
+    """Get problems matching given tags that haven't been attempted yet."""
     conn = get_connection()
     if not tags:
         return []
@@ -414,7 +415,7 @@ def get_unsolved_by_tags(tags: list[str], limit: int = 5) -> list[Problem]:
             JOIN problem_tags pt ON p.id = pt.problem_id
             WHERE pt.tag IN ({placeholders})
               AND p.id NOT IN (
-                  SELECT problem_id FROM attempts WHERE self_rating IS NOT NULL AND self_rating <= 2
+                  SELECT DISTINCT problem_id FROM attempts
               )
             ORDER BY RANDOM()
             LIMIT ?""",

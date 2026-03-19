@@ -194,3 +194,13 @@ def show_companies(companies: list[dict]) -> None:
     console.print(table)
     console.print()
     console.print("[dim]输入公司名称即可选择[/dim]")
+
+
+def show_tags(tags: list[dict]) -> None:
+    table = Table(title="支持的标签", border_style="cyan")
+    table.add_column("ID", style="dim", width=4, justify="right")
+    table.add_column("标签", style="white")
+    for t in tags:
+        table.add_row(str(t["id"]), t["name"])
+    console.print(table)
+    console.print()
