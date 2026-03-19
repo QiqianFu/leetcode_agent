@@ -142,3 +142,11 @@ src/lc/
 - **AI**: DeepSeek (OpenAI 兼容 API，支持 function calling)
 - **数据**: SQLite
 - **题目来源**: LeetCode GraphQL API + CodeTop API
+
+## 贡献
+
+欢迎提 Issue 和 Pull Request！无论是 bug 反馈、功能建议还是代码改进，都非常欢迎。
+
+## License
+
+[MIT](LICENSE)

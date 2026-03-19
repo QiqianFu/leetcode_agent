@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "leetcode-agent"
 version = "0.1.0"
 requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "QiqianFu"}]
 dependencies = [
     "rich>=13.0",
     "openai>=1.0",
