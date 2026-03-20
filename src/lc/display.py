@@ -161,7 +161,7 @@ def show_submit_summary(problem: Problem, rating: int, reviews_scheduled: int, t
 
 def show_hot_problems(
     problems: list[CodetopProblem],
-    solved_ids: set[int],
+    attempted_ids: set[int],
     company: str | None = None,
 ) -> None:
     title = f"高频题 — {company}" if company else "高频题 — 全站"
@@ -173,13 +173,13 @@ def show_hot_problems(
     table.add_column("状态", width=6, justify="center")
     for cp in problems:
         diff_color = DIFFICULTY_COLORS.get(cp.difficulty, "white")
-        done = "[green]Done[/green]" if cp.leetcode_id in solved_ids else "[dim]--[/dim]"
+        status = "[yellow]复习[/yellow]" if cp.leetcode_id in attempted_ids else "[dim]新题[/dim]"
         table.add_row(
             str(cp.leetcode_id),
             cp.title,
             f"[{diff_color}]{cp.difficulty}[/{diff_color}]",
             str(cp.frequency),
-            done,
+            status,
         )
     console.print(table)
     console.print()

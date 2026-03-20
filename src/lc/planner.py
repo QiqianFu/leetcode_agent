@@ -68,8 +68,8 @@ def generate_daily_plan(
     """
     plan = DailyPlan()
 
-    # 1. Pending reviews always first
-    pending = db.get_pending_reviews()
+    # 1. Pending reviews always first (deduplicate by problem_id)
+    pending = db.get_pending_reviews_by_problem()
     for review in pending:
         problem = db.get_problem(review.problem_id)
         if problem:
@@ -130,14 +130,14 @@ def _pick_from_codetop(
     import random
     from lc.codetop_api import fetch_all_hot
 
-    solved_ids = db.get_solved_problem_ids()
+    attempted_ids = db.get_attempted_problem_ids()
     # Fetch more pages when randomizing to get a bigger pool
     max_pages = 3 if randomize else 1
     hot = fetch_all_hot(company=company, max_pages=max_pages)
 
     candidates = []
     for cp in hot:
-        if cp.leetcode_id in solved_ids:
+        if cp.leetcode_id in attempted_ids:
             continue
         if difficulty and cp.difficulty != difficulty:
             continue

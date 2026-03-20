@@ -252,9 +252,33 @@ def get_pending_reviews(as_of: str | None = None) -> list[Review]:
     return [Review.from_row(r) for r in rows]
 
 
+def get_pending_reviews_by_problem(as_of: str | None = None) -> list[Review]:
+    """Return pending reviews deduplicated by problem_id, keeping the earliest due one."""
+    deduped: list[Review] = []
+    seen_problem_ids: set[int] = set()
+    for review in get_pending_reviews(as_of=as_of):
+        if review.problem_id in seen_problem_ids:
+            continue
+        seen_problem_ids.add(review.problem_id)
+        deduped.append(review)
+    return deduped
+
+
 def complete_review(review_id: int) -> None:
     conn = get_connection()
     conn.execute("UPDATE reviews SET completed = 1 WHERE id = ?", (review_id,))
+    conn.commit()
+
+
+def complete_due_reviews(problem_id: int, as_of: str | None = None) -> None:
+    """Mark all currently due reviews for a problem as completed."""
+    if as_of is None:
+        as_of = date.today().isoformat()
+    conn = get_connection()
+    conn.execute(
+        "UPDATE reviews SET completed = 1 WHERE problem_id = ? AND due_date <= ? AND completed = 0",
+        (problem_id, as_of),
+    )
     conn.commit()
 
 
@@ -368,10 +392,7 @@ def get_attempt_stats() -> dict:
     avg = conn.execute(
         "SELECT AVG(self_rating) as avg FROM attempts WHERE self_rating IS NOT NULL"
     ).fetchone()["avg"]
-    pending = conn.execute(
-        "SELECT COUNT(*) as cnt FROM reviews WHERE completed = 0 AND due_date <= ?",
-        (date.today().isoformat(),),
-    ).fetchone()["cnt"]
+    pending = len(get_pending_reviews_by_problem())
     # Recent 7 days
     week_ago = (date.today() - timedelta(days=7)).isoformat()
     recent_7d = conn.execute(
@@ -430,10 +451,15 @@ def get_unsolved_by_tags(tags: list[str], limit: int = 5) -> list[Problem]:
     return problems
 
 
-def get_solved_problem_ids() -> set[int]:
-    """Return set of problem IDs that have been submitted (self_rating IS NOT NULL)."""
+def get_attempted_problem_ids() -> set[int]:
+    """Return problem IDs that have been attempted, including abandoned/in-progress ones."""
     conn = get_connection()
     rows = conn.execute(
-        "SELECT DISTINCT problem_id FROM attempts WHERE self_rating IS NOT NULL"
+        "SELECT DISTINCT problem_id FROM attempts"
     ).fetchall()
     return {r["problem_id"] for r in rows}
+
+
+def get_solved_problem_ids() -> set[int]:
+    """Backward-compatible alias for attempted problem IDs."""
+    return get_attempted_problem_ids()

@@ -517,7 +517,7 @@ def handle_review() -> None:
     from lc.display import show_review_list
     from lc.agent import _arrow_select, start_problem
 
-    pending = db.get_pending_reviews()
+    pending = db.get_pending_reviews_by_problem()
     reviews_with_problems = []
     for r in pending:
         problem = db.get_problem(r.problem_id)
@@ -575,8 +575,8 @@ def handle_hot() -> None:
     if not problems:
         console.print("[yellow]暂无数据。请先用 /config 设置公司。[/yellow]")
         return
-    solved_ids = db.get_solved_problem_ids()
-    show_hot_problems(problems[:15], solved_ids, company=company)
+    attempted_ids = db.get_attempted_problem_ids()
+    show_hot_problems(problems[:15], attempted_ids, company=company)
 
     from lc.models import Problem
     choices = [

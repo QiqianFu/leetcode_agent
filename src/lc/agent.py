@@ -196,14 +196,15 @@ def _arrow_select(choices: list[tuple[str, any]]) -> any | None:
         return "\r\n".join(lines)
 
     def _clear():
-        """Move cursor up and clear all selector lines."""
-        # Move to start of first line, then clear to end of screen
-        sys.stdout.write(f"\r\033[{total_lines - 1}A\033[J")
-
-    total_lines = len(choices) + 2  # choices + blank + hint
+        """Restore cursor to saved position and clear to end of screen."""
+        sys.stdout.write("\033[u\033[J")
 
     try:
         tty.setraw(fd)
+        # Flush any pending Rich/console output before raw mode rendering
+        sys.stdout.flush()
+        # Save cursor position, then render
+        sys.stdout.write("\033[s")
         sys.stdout.write(_render())
         sys.stdout.flush()
 
@@ -369,7 +370,8 @@ def submit_current_problem(rating: int, notes: str = None) -> str:
     reviews_scheduled = 0
 
     if active_review:
-        db.complete_review(active_review.id)
+        # One review session should clear all overdue review entries for the same problem.
+        db.complete_due_reviews(pid)
         new_reviews, should_cancel = handle_review_submit(active_review, rating)
         if should_cancel:
             db.cancel_future_reviews(pid)
@@ -687,4 +689,3 @@ class Agent:
         _, aid = current
         db.increment_teach(aid)
         return "已记录讲解。"
-
