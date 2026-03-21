@@ -20,7 +20,7 @@ def get_connection() -> sqlite3.Connection:
     return _conn
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Each migration is a list of SQL statements to run.
 # Index 0 = migration from version 0 to 1 (initial schema), etc.
@@ -76,6 +76,10 @@ _MIGRATIONS = [
     # v1 → v2: add code_snippet column
     [
         "ALTER TABLE problems ADD COLUMN code_snippet TEXT DEFAULT ''",
+    ],
+    # v2 → v3: add category column for AI-classified algorithm type
+    [
+        "ALTER TABLE problems ADD COLUMN category TEXT DEFAULT NULL",
     ],
 ]
 
@@ -139,6 +143,11 @@ def upsert_problem(p: Problem) -> None:
                fetched_at=datetime('now')""",
         (p.id, p.title, p.title_slug, p.difficulty, p.description, p.ac_rate, p.code_snippet),
     )
+    if p.category:
+        conn.execute(
+            "UPDATE problems SET category = ? WHERE id = ?",
+            (p.category, p.id),
+        )
     # replace tags
     conn.execute("DELETE FROM problem_tags WHERE problem_id = ?", (p.id,))
     for tag in p.tags:
@@ -146,6 +155,15 @@ def upsert_problem(p: Problem) -> None:
             "INSERT INTO problem_tags (problem_id, tag) VALUES (?, ?)",
             (p.id, tag),
         )
+    conn.commit()
+
+
+def set_problem_category(problem_id: int, category: str) -> None:
+    conn = get_connection()
+    conn.execute(
+        "UPDATE problems SET category = ? WHERE id = ?",
+        (category, problem_id),
+    )
     conn.commit()
 
 
@@ -304,29 +322,32 @@ def get_active_review_for_problem(problem_id: int) -> Review | None:
 # --------------- tag_stats ---------------
 
 def update_tag_stats(problem_id: int) -> None:
+    """Update category-based stats for the problem's AI-classified category."""
     conn = get_connection()
-    tags = conn.execute(
-        "SELECT tag FROM problem_tags WHERE problem_id = ?", (problem_id,)
-    ).fetchall()
-    for (tag,) in tags:
-        stats = conn.execute(
-            """SELECT COUNT(*) as total, AVG(a.self_rating) as avg_rating,
-                      MAX(a.started_at) as last_practiced
-               FROM attempts a
-               JOIN problem_tags pt ON a.problem_id = pt.problem_id
-               WHERE pt.tag = ? AND a.self_rating IS NOT NULL""",
-            (tag,),
-        ).fetchone()
-        if stats and stats["total"] > 0:
-            conn.execute(
-                """INSERT INTO tag_stats (tag, total_attempts, avg_rating, last_practiced)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(tag) DO UPDATE SET
-                       total_attempts=excluded.total_attempts,
-                       avg_rating=excluded.avg_rating,
-                       last_practiced=excluded.last_practiced""",
-                (tag, stats["total"], stats["avg_rating"], stats["last_practiced"]),
-            )
+    row = conn.execute(
+        "SELECT category FROM problems WHERE id = ?", (problem_id,)
+    ).fetchone()
+    if not row or not row["category"]:
+        return
+    category = row["category"]
+    stats = conn.execute(
+        """SELECT COUNT(*) as total, AVG(a.self_rating) as avg_rating,
+                  MAX(a.started_at) as last_practiced
+           FROM attempts a
+           JOIN problems p ON a.problem_id = p.id
+           WHERE p.category = ? AND a.self_rating IS NOT NULL""",
+        (category,),
+    ).fetchone()
+    if stats and stats["total"] > 0:
+        conn.execute(
+            """INSERT INTO tag_stats (tag, total_attempts, avg_rating, last_practiced)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(tag) DO UPDATE SET
+                   total_attempts=excluded.total_attempts,
+                   avg_rating=excluded.avg_rating,
+                   last_practiced=excluded.last_practiced""",
+            (category, stats["total"], stats["avg_rating"], stats["last_practiced"]),
+        )
     conn.commit()
 
 
@@ -426,15 +447,14 @@ def get_attempt_stats() -> dict:
 
 
 def get_unsolved_by_tags(tags: list[str], limit: int = 5) -> list[Problem]:
-    """Get problems matching given tags that haven't been attempted yet."""
+    """Get problems matching given categories that haven't been attempted yet."""
     conn = get_connection()
     if not tags:
         return []
     placeholders = ",".join("?" * len(tags))
     rows = conn.execute(
         f"""SELECT DISTINCT p.* FROM problems p
-            JOIN problem_tags pt ON p.id = pt.problem_id
-            WHERE pt.tag IN ({placeholders})
+            WHERE p.category IN ({placeholders})
               AND p.id NOT IN (
                   SELECT DISTINCT problem_id FROM attempts
               )

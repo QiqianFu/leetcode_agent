@@ -124,48 +124,55 @@ def _pick_from_codetop(
 ) -> list[Problem]:
     """Pick unsolved problems from CodeTop.
 
-    By default ordered by frequency. If randomize=True, fetch a larger pool
-    and randomly sample from it.
+    Fetches pages incrementally until we have at least `limit` candidates.
+    If randomize=True, fetch extra pages and randomly sample.
     """
     import random
-    from lc.codetop_api import fetch_all_hot
+    from lc.codetop_api import fetch_hot_problems
 
     attempted_ids = db.get_attempted_problem_ids()
-    # Fetch more pages when randomizing to get a bigger pool
-    max_pages = 3 if randomize else 1
-    hot = fetch_all_hot(company=company, max_pages=max_pages)
-
     candidates = []
-    for cp in hot:
-        if cp.leetcode_id in attempted_ids:
-            continue
-        if difficulty and cp.difficulty != difficulty:
-            continue
-        # Tag filter
-        if tag:
-            p = db.get_problem(cp.leetcode_id)
-            if not p or not p.tags:
-                # Not in DB — fetch from LeetCode and cache
-                try:
-                    from lc.leetcode_api import fetch_problem
-                    p = fetch_problem(cp.leetcode_id)
-                    db.upsert_problem(p)
-                except Exception:
-                    continue  # Can't verify tag, skip
-            if not _match_tag(tag, p.tags):
-                continue
+    page = 1
+    max_pages = 20  # safety cap
 
-        candidates.append(Problem(
-            id=cp.leetcode_id,
-            title=cp.title,
-            title_slug=cp.title_slug,
-            difficulty=cp.difficulty,
-            ac_rate=None,
-            tags=[],
-        ))
-        # For non-random mode, stop early
-        if not randomize and len(candidates) >= limit:
+    # Random mode: gather a larger pool (at least 5x limit)
+    target = limit * 5 if randomize else limit
+
+    while page <= max_pages and len(candidates) < target:
+        problems, total = fetch_hot_problems(company=company, page=page, page_size=20)
+        if not problems:
             break
+
+        for cp in problems:
+            if cp.leetcode_id in attempted_ids:
+                continue
+            if difficulty and cp.difficulty != difficulty:
+                continue
+            if tag:
+                p = db.get_problem(cp.leetcode_id)
+                if not p or not p.tags:
+                    try:
+                        from lc.leetcode_api import fetch_problem
+                        p = fetch_problem(cp.leetcode_id)
+                        db.upsert_problem(p)
+                    except Exception:
+                        continue
+                if not _match_tag(tag, p.tags):
+                    continue
+
+            candidates.append(Problem(
+                id=cp.leetcode_id,
+                title=cp.title,
+                title_slug=cp.title_slug,
+                difficulty=cp.difficulty,
+                ac_rate=None,
+                tags=[],
+            ))
+
+        # Check if we've exhausted all available problems
+        if page * 20 >= total:
+            break
+        page += 1
 
     if randomize and len(candidates) > limit:
         return random.sample(candidates, limit)

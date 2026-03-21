@@ -6,7 +6,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from lc.codetop_api import CodetopProblem
-from lc.models import Problem, Review, TagStat
+from lc.models import CATEGORY_LABELS, Problem, Review, TagStat
 from lc.planner import DailyPlan
 
 console = Console()
@@ -96,12 +96,13 @@ def show_status(stats: dict, weak_tags: list[TagStat]) -> None:
     console.print(Panel(summary, title="刷题统计", border_style="blue"))
 
     if weak_tags:
-        table = Table(title="薄弱标签（按难度排序）", border_style="red")
-        table.add_column("标签", style="white")
+        table = Table(title="薄弱题型（按评分排序）", border_style="red")
+        table.add_column("题型", style="white")
         table.add_column("做题数", style="cyan", justify="right")
         table.add_column("平均评分", style="yellow", justify="right")
         for ts in weak_tags:
-            table.add_row(ts.tag, str(ts.total_attempts), f"{ts.avg_rating:.1f}")
+            label = CATEGORY_LABELS.get(ts.tag, ts.tag)
+            table.add_row(label, str(ts.total_attempts), f"{ts.avg_rating:.1f}")
         console.print(table)
 
 

@@ -15,7 +15,7 @@ from rich.theme import Theme
 
 from lc import db, state
 from lc.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-from lc.models import Problem
+from lc.models import CATEGORIES, Problem
 
 _THEME = Theme({
     "markdown.code": "bold cyan",
@@ -41,7 +41,9 @@ SYSTEM_PROMPT = """\
 - 用户要讲解 → 先 read_solution 读代码，然后调 count_teach 记录，再给讲解
 - 用户想看代码 → read_solution
 - 用户想做某道题（给了题号） → start_problem
+- 用户提到了题目名称但没给题号（如"走楼梯那题"、"两数之和"、"LRU缓存"） → 先用 search_problem 搜索（关键词必须用英文，你自行翻译），搜到结果后让用户选择
 - 用户想刷题但没指定题号（如"开始"、"来一道"、"刷题"等） → 直接调 pick_problem，不要反问
+- 用户想刷特定类型的题（如"来一道堆的题"、"给我一道动态规划"） → 如果用户没有指定难度，必须先反问"想要什么难度？Easy / Medium / Hard / 不限"，拿到回答后再调 pick_problem 传 tag（和 difficulty）
 - 用户说做完了/结束/想提交/完成了 → 直接调 finish_problem 触发提交流程
 - 用户要放弃当前题 → 直接 abandon_problem
 - 查看计划/统计/复习/高频 → 告诉用户用斜杠命令：/today, /status, /review, /hot
@@ -77,8 +79,35 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "pick_problem",
-            "description": "根据用户已配置的刷题计划（公司、难度、模式）自动抽题并开始。用户想刷题但没指定题号时调用此工具。",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "抽题并开始。无参数时按用户配置抽题；传 tag 时无视配置，按频率抽该标签的题。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tag": {
+                        "type": "string",
+                        "description": "指定标签（如 堆、动态规划、链表），按频率抽该标签的题",
+                    },
+                    "difficulty": {
+                        "type": "string",
+                        "enum": ["Easy", "Medium", "Hard"],
+                        "description": "指定难度，用户不需要时不传",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_problem",
+            "description": "用英文关键词搜索 LeetCode 题目。返回匹配的题目列表供用户选择。注意：只支持英文搜索，用户说中文时你需要自行翻译成英文关键词。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "英文搜索关键词，如 climbing stairs, two sum, LRU"},
+                },
+                "required": ["keyword"],
+            },
         },
     },
     {
@@ -132,7 +161,7 @@ TOOLS = [
 
 # Tools that don't need an AI follow-up response
 _SELF_CONTAINED_TOOLS = {
-    "abandon_problem", "pick_problem", "finish_problem",
+    "abandon_problem", "pick_problem", "finish_problem", "search_problem",
 }
 
 
@@ -295,6 +324,39 @@ def _detect_imports(snippet: str) -> str:
     return "\n".join(lines)
 
 
+def _classify_problem(problem: Problem) -> str:
+    """Use AI to classify a problem into one of the predefined categories."""
+    categories_str = ", ".join(CATEGORIES)
+    prompt = (
+        f"将这道 LeetCode 题分类到以下类别之一（只回复类别名，不要其他内容）：\n"
+        f"{categories_str}\n\n"
+        f"题目: {problem.id}. {problem.title}\n"
+        f"难度: {problem.difficulty}\n"
+        f"LeetCode 标签: {', '.join(problem.tags)}\n"
+    )
+    if problem.description:
+        # Only send first 200 chars to save tokens
+        prompt += f"描述: {problem.description[:200]}\n"
+
+    try:
+        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+        resp = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=20,
+        )
+        answer = resp.choices[0].message.content.strip().lower()
+        # Match against valid categories
+        for cat in CATEGORIES:
+            if cat in answer:
+                return cat
+    except Exception:
+        pass
+    # Fallback: old heuristic
+    return _pick_category_heuristic(problem.tags)
+
+
 _DATA_STRUCTURE_TAGS = {
     "array", "string", "hash table", "linked list", "stack", "queue",
     "tree", "binary tree", "binary search tree", "graph", "matrix",
@@ -302,8 +364,8 @@ _DATA_STRUCTURE_TAGS = {
 }
 
 
-def _pick_category(tags: list[str]) -> str:
-    """Pick an algorithm-type tag over data-structure tags for folder name."""
+def _pick_category_heuristic(tags: list[str]) -> str:
+    """Fallback: pick an algorithm-type tag over data-structure tags for folder name."""
     for tag in tags:
         if tag.lower() not in _DATA_STRUCTURE_TAGS:
             return tag
@@ -311,7 +373,7 @@ def _pick_category(tags: list[str]) -> str:
 
 
 def _create_solution_file(problem: Problem) -> Path:
-    category = _slugify(_pick_category(problem.tags))
+    category = _slugify(problem.category or _pick_category_heuristic(problem.tags))
     dir_path = Path.cwd() / category
     dir_path.mkdir(exist_ok=True)
 
@@ -420,6 +482,12 @@ def start_problem(problem_id: int) -> tuple[Problem, Path] | str:
         except Exception as e:
             return f"获取题目失败: {e}"
 
+    # AI classify if not already categorized
+    if not problem.category:
+        console.print("[dim]  ⚙ 分类中...[/dim]")
+        problem.category = _classify_problem(problem)
+        db.set_problem_category(problem.id, problem.category)
+
     file_path = _create_solution_file(problem)
     attempt_id = db.create_attempt(problem_id)
     state.set_current(problem_id, attempt_id, file_path=str(file_path))
@@ -455,6 +523,10 @@ class Agent:
             attempt = db.get_attempt(aid)
             if problem:
                 parts.append(f"\n[当前题目] {problem.id}. {problem.title} ({problem.difficulty})")
+                from lc.models import CATEGORY_LABELS
+                cat_label = CATEGORY_LABELS.get(problem.category, "") if problem.category else ""
+                if cat_label:
+                    parts.append(f"题型: {cat_label}")
                 parts.append(f"标签: {', '.join(problem.tags)}")
                 fp = state.get_file_path()
                 if fp:
@@ -585,7 +657,8 @@ class Agent:
         handlers = {
             "read_solution": lambda: self._tool_read_solution(),
             "append_solution": lambda: self._tool_append_solution(args.get("content", "")),
-            "pick_problem": lambda: self._tool_pick_problem(),
+            "search_problem": lambda: self._tool_search_problem(args.get("keyword", "")),
+            "pick_problem": lambda: self._tool_pick_problem(tag=args.get("tag"), difficulty=args.get("difficulty")),
             "start_problem": lambda: self._tool_start_problem(args.get("problem_id")),
             "finish_problem": lambda: self._tool_finish_problem(),
             "abandon_problem": lambda: self._tool_abandon(),
@@ -626,8 +699,29 @@ class Agent:
         return f"已追加到 {fp}"
 
 
-    def _tool_pick_problem(self) -> str:
-        """Auto-pick a problem using handle_today logic."""
+    def _tool_search_problem(self, keyword: str) -> str:
+        from lc.leetcode_api import search_problems
+        results = search_problems(keyword, limit=5)
+        if not results:
+            return f"没有找到与「{keyword}」相关的题目。"
+
+        choices = [
+            (f"#{p.id} {p.title} ({p.difficulty})", p)
+            for p in results
+        ]
+        selected = _arrow_select(choices)
+        if selected:
+            result = start_problem(selected.id)
+            if not isinstance(result, str):
+                self._pending_clear = True
+                return f"已开始: {selected.id}. {selected.title}"
+            return result
+        return "未选题。"
+
+    def _tool_pick_problem(self, tag: str | None = None, difficulty: str | None = None) -> str:
+        """Auto-pick a problem. If tag is given, pick by tag ignoring config."""
+        if tag:
+            return self._tool_pick_by_tag(tag, difficulty)
         from lc.cli import handle_today
         handle_today()
         current = state.get_current()
@@ -637,6 +731,28 @@ class Agent:
             problem = db.get_problem(pid)
             if problem:
                 return f"已开始: {problem.id}. {problem.title}"
+        return "未选题。"
+
+    def _tool_pick_by_tag(self, tag: str, difficulty: str | None = None) -> str:
+        """Pick a problem by tag, ignoring config, ordered by frequency."""
+        from lc.planner import _pick_from_codetop
+        problems = _pick_from_codetop(tag=tag, difficulty=difficulty, limit=5, randomize=False)
+        if not problems:
+            return f"没有找到标签为「{tag}」的未做题目。"
+
+        choices = [
+            (f"#{p.id} {p.title} ({p.difficulty})", p)
+            for p in problems
+        ]
+        selected = _arrow_select(choices)
+        if selected:
+            start_problem(selected.id)
+            current = state.get_current()
+            if current:
+                self._pending_clear = True
+                problem = db.get_problem(selected.id)
+                if problem:
+                    return f"已开始: {problem.id}. {problem.title}"
         return "未选题。"
 
     def _tool_start_problem(self, problem_id: int) -> str:

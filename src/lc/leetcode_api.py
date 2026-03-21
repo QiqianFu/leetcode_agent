@@ -84,6 +84,28 @@ def _html_to_text(html: str) -> str:
     return text.strip()
 
 
+def search_problems(keyword: str, limit: int = 5) -> list[Problem]:
+    """Search problems by English keyword. Returns a list of matching problems."""
+    data = _graphql(PROBLEM_LIST_QUERY, {
+        "categorySlug": "",
+        "limit": limit,
+        "skip": 0,
+        "filters": {"searchKeywords": keyword},
+    })
+    questions = data.get("problemsetQuestionList", {}).get("questions", [])
+    results = []
+    for q in questions:
+        results.append(Problem(
+            id=int(q["frontendQuestionId"]),
+            title=q["title"],
+            title_slug=q["titleSlug"],
+            difficulty=q["difficulty"],
+            ac_rate=q.get("acRate"),
+            tags=[t["name"] for t in q.get("topicTags", [])],
+        ))
+    return results
+
+
 def fetch_problem(problem_id: int) -> Problem:
     """Fetch a problem by its frontend ID. Two API calls: list search + detail."""
     # Step 1: find titleSlug via search

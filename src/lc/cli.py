@@ -24,6 +24,7 @@ def handle_config() -> None:
     console.print()
     console.print("[bold]设置刷题偏好[/bold]\n")
 
+    # ── 公司 ──
     from lc.codetop_api import fetch_companies
     console.print("[dim]正在获取公司列表...[/dim]")
     companies = fetch_companies()
@@ -31,11 +32,8 @@ def handle_config() -> None:
         show_companies(companies)
 
     current_company = get_config("company") or ""
-    company = Prompt.ask(
-        "目标公司（直接回车跳过）",
-        default=current_company,
-        show_default=bool(current_company),
-    )
+    prompt_hint = f"目标公司（当前: {current_company}，直接回车清除）" if current_company else "目标公司（直接回车跳过）"
+    company = Prompt.ask(prompt_hint, default="")
     if company.strip():
         valid_names = [c["name"] for c in companies]
         if company in valid_names:
@@ -49,13 +47,22 @@ def handle_config() -> None:
             else:
                 console.print(f"[red]未找到「{company}」，公司设置未更改。[/red]")
     else:
-        console.print("[dim]公司: 跳过[/dim]")
+        if current_company:
+            set_config("company", "")
+            console.print("[green]公司限制已清除[/green]")
+        else:
+            console.print("[dim]公司: 跳过[/dim]")
 
+    # ── 难度 ──
     console.print()
+    # Map stored value (e.g. "Medium") back to choice key (e.g. "medium")
+    _diff_reverse = {v.lower(): k for k, v in DIFFICULTY_CHOICES.items()}
+    stored_diff = (get_config("difficulty") or "").lower()
+    diff_default = _diff_reverse.get(stored_diff, "all")
     diff = Prompt.ask(
         "难度偏好",
         choices=["easy", "medium", "hard", "all"],
-        default=get_config("difficulty") or "all",
+        default=diff_default,
     )
     if diff == "all":
         set_config("difficulty", "")
@@ -64,56 +71,60 @@ def handle_config() -> None:
         set_config("difficulty", DIFFICULTY_CHOICES[diff])
         console.print(f"[green]难度已设置为: {DIFFICULTY_CHOICES[diff]}[/green]")
 
-    # Mode selection
+    # ── 排序方式 ──
     console.print()
     current_mode = get_config("mode") or "default"
+    if current_mode == "tag":
+        current_mode = "default"  # migrate old "tag" mode
     mode = Prompt.ask(
-        "刷题模式",
-        choices=["default", "random", "tag"],
+        "排序方式",
+        choices=["default", "random"],
         default=current_mode,
     )
     set_config("mode", mode)
+    mode_labels = {"default": "按频率", "random": "随机"}
+    console.print(f"[green]排序: {mode_labels[mode]}[/green]")
 
-    if mode == "tag":
-        from lc.codetop_api import fetch_tags
-        console.print("[dim]正在获取标签列表...[/dim]")
-        tags = fetch_tags()
-        if tags:
-            show_tags(tags)
-        current_tag = get_config("tag") or ""
-        tag_input = Prompt.ask(
-            "目标标签（输入标签名称）",
-            default=current_tag,
-            show_default=bool(current_tag),
-        )
-        if tag_input.strip() and tags:
-            tag_names = [t["name"] for t in tags]
-            if tag_input in tag_names:
-                set_config("tag", tag_input)
-                console.print(f"[green]标签已设置为: {tag_input}[/green]")
+    # ── 标签过滤（独立于排序） ──
+    console.print()
+    current_tag = get_config("tag") or ""
+    tag_prompt = f"标签过滤（当前: {current_tag}，直接回车清除）" if current_tag else "标签过滤（直接回车跳过）"
+    from lc.codetop_api import fetch_tags
+    console.print("[dim]正在获取标签列表...[/dim]")
+    tags = fetch_tags()
+    if tags:
+        show_tags(tags)
+    tag_input = Prompt.ask(tag_prompt, default="")
+    if tag_input.strip() and tags:
+        tag_names = [t["name"] for t in tags]
+        if tag_input in tag_names:
+            set_config("tag", tag_input)
+            console.print(f"[green]标签已设置为: {tag_input}[/green]")
+        else:
+            matches = [n for n in tag_names if tag_input.lower() in n.lower()]
+            if matches:
+                set_config("tag", matches[0])
+                console.print(f"[green]标签已设置为: {matches[0]}[/green]")
             else:
-                matches = [n for n in tag_names if tag_input.lower() in n.lower()]
-                if matches:
-                    set_config("tag", matches[0])
-                    console.print(f"[green]标签已设置为: {matches[0]}[/green]")
-                else:
-                    console.print(f"[red]未找到「{tag_input}」，标签设置未更改。[/red]")
+                console.print(f"[red]未找到「{tag_input}」，标签设置未更改。[/red]")
+    else:
+        if current_tag:
+            set_config("tag", "")
+            console.print("[green]标签过滤已清除[/green]")
         else:
             console.print("[dim]标签: 跳过[/dim]")
 
-    mode_labels = {"default": "按频率", "random": "随机", "tag": "按标签"}
-    mode_display = mode_labels.get(mode, mode)
-    if mode == "tag":
-        mode_display += f" ({get_config('tag') or '未设置'})"
-    console.print(f"[green]模式已设置为: {mode_display}[/green]")
-
+    # ── 汇总 ──
     console.print()
-    company_display = get_config("company") or "未设置"
+    company_display = get_config("company") or "不限"
     diff_display = get_config("difficulty") or "不限"
+    mode_display = mode_labels.get(get_config("mode") or "default", "按频率")
+    tag_display = get_config("tag") or "不限"
     console.print(Panel(
         f"公司: [cyan]{company_display}[/cyan]\n"
         f"难度: [cyan]{diff_display}[/cyan]\n"
-        f"模式: [cyan]{mode_display}[/cyan]",
+        f"排序: [cyan]{mode_display}[/cyan]\n"
+        f"标签: [cyan]{tag_display}[/cyan]",
         title="当前设置",
         border_style="blue",
     ))
@@ -131,7 +142,7 @@ SLASH_COMMANDS = [
     ("/review", "待复习列表"),
     ("/hot",    "高频面试题"),
     ("/undo",   "撤回上次提交"),
-    ("/config", "设置公司、难度、刷题模式"),
+    ("/config", "设置公司、难度、排序、标签"),
     ("/help",   "显示帮助"),
     ("/quit",   "退出"),
 ]
@@ -151,7 +162,7 @@ HELP_TEXT = """
   [cyan]/review[/cyan]  待复习列表
   [cyan]/hot[/cyan]     高频面试题
   [cyan]/undo[/cyan]    撤回上次提交
-  [cyan]/config[/cyan]  设置公司、难度、刷题模式
+  [cyan]/config[/cyan]  设置公司、难度、排序、标签
   [cyan]/help[/cyan]    显示帮助
   [cyan]/quit[/cyan]    退出
 """.strip()
@@ -339,12 +350,13 @@ def show_welcome() -> None:
     company = get_config("company")
     difficulty = get_config("difficulty") or "不限"
     mode = get_config("mode") or "default"
-    mode_labels = {"default": "按频率", "random": "随机", "tag": "按标签"}
+    mode_labels = {"default": "按频率", "random": "随机"}
     mode_display = mode_labels.get(mode, mode)
-    if mode == "tag":
-        mode_display += f" ({get_config('tag') or '未设置'})"
+    tag = get_config("tag")
+    if tag:
+        mode_display += f" | 标签: {tag}"
     if company:
-        console.print(f"\n[dim]当前目标: {company} | 难度: {difficulty} | 模式: {mode_display}[/dim]\n")
+        console.print(f"\n[dim]当前目标: {company} | 难度: {difficulty} | {mode_display}[/dim]\n")
     else:
         console.print("\n[dim]首次使用？输入 /config 设置目标公司和难度。[/dim]\n")
 
@@ -359,7 +371,7 @@ def handle_today() -> None:
     company = get_config("company") or None
     difficulty = get_config("difficulty") or None
     mode = get_config("mode") or "default"
-    tag = get_config("tag") if mode == "tag" else None
+    tag = get_config("tag") or None
     plan = generate_daily_plan(
         company=company, difficulty=difficulty, tag=tag, randomize=(mode == "random"),
     )
