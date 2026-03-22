@@ -161,7 +161,7 @@ TOOLS = [
 
 # Tools that don't need an AI follow-up response
 _SELF_CONTAINED_TOOLS = {
-    "abandon_problem", "pick_problem", "finish_problem", "search_problem",
+    "abandon_problem", "pick_problem", "finish_problem",
 }
 
 
@@ -339,7 +339,7 @@ def _classify_problem(problem: Problem) -> str:
         prompt += f"描述: {problem.description[:200]}\n"
 
     try:
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL, timeout=30)
         resp = client.chat.completions.create(
             model=DEEPSEEK_MODEL,
             messages=[{"role": "user", "content": prompt}],
@@ -388,6 +388,14 @@ def _create_solution_file(problem: Problem) -> Path:
         f"# https://leetcode.com/problems/{problem.title_slug}/",
         "",
     ]
+
+    # Add problem description as comments
+    if problem.description:
+        lines.append('"""')
+        for desc_line in problem.description.strip().splitlines():
+            lines.append(desc_line)
+        lines.append('"""')
+        lines.append("")
 
     # Auto-detect needed imports from code snippet
     snippet = problem.code_snippet or ""
@@ -477,16 +485,17 @@ def start_problem(problem_id: int) -> tuple[Problem, Path] | str:
     if problem is None or problem.description is None:
         try:
             from lc.leetcode_api import fetch_problem
-            problem = fetch_problem(problem_id)
-            db.upsert_problem(problem)
+            with console.status("[bold cyan]正在获取题目...[/bold cyan]"):
+                problem = fetch_problem(problem_id)
+                db.upsert_problem(problem)
         except Exception as e:
             return f"获取题目失败: {e}"
 
     # AI classify if not already categorized
     if not problem.category:
-        console.print("[dim]  ⚙ 分类中...[/dim]")
-        problem.category = _classify_problem(problem)
-        db.set_problem_category(problem.id, problem.category)
+        with console.status("[bold cyan]分类中...[/bold cyan]"):
+            problem.category = _classify_problem(problem)
+            db.set_problem_category(problem.id, problem.category)
 
     file_path = _create_solution_file(problem)
     attempt_id = db.create_attempt(problem_id)
@@ -509,7 +518,7 @@ class Agent:
         if not DEEPSEEK_API_KEY:
             console.print("[red]错误: 请在 .env 文件中设置 DEEPSEEK_API_KEY[/red]")
             raise SystemExit(1)
-        self.client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+        self.client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL, timeout=60)
         self.messages: list[dict] = []
         self._pending_clear = False
 

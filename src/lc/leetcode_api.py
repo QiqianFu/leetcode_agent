@@ -55,24 +55,24 @@ query questionData($titleSlug: String!) {
 
 
 def _graphql(query: str, variables: dict, retries: int = 2) -> dict:
-    for attempt in range(retries + 1):
-        try:
-            with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=15) as client:
+        for attempt in range(retries + 1):
+            try:
                 resp = client.post(
                     LEETCODE_GRAPHQL_URL,
                     json={"query": query, "variables": variables},
                     headers=_HEADERS,
                 )
-            if resp.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            resp.raise_for_status()
-            return resp.json()["data"]
-        except (httpx.HTTPError, KeyError):
-            if attempt < retries:
-                time.sleep(1)
-                continue
-            raise
+                if resp.status_code == 429:
+                    time.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+                return resp.json()["data"]
+            except (httpx.HTTPError, KeyError):
+                if attempt < retries:
+                    time.sleep(1)
+                    continue
+                raise
     raise ConnectionError("LeetCode API 请求失败，请检查网络连接后重试。")
 
 

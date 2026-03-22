@@ -355,10 +355,8 @@ def show_welcome() -> None:
     tag = get_config("tag")
     if tag:
         mode_display += f" | 标签: {tag}"
-    if company:
-        console.print(f"\n[dim]当前目标: {company} | 难度: {difficulty} | {mode_display}[/dim]\n")
-    else:
-        console.print("\n[dim]首次使用？输入 /config 设置目标公司和难度。[/dim]\n")
+    company_display = company or "不限"
+    console.print(f"\n[dim]当前目标: {company_display} | 难度: {difficulty} | {mode_display}[/dim]\n")
 
 
 
@@ -372,9 +370,10 @@ def handle_today() -> None:
     difficulty = get_config("difficulty") or None
     mode = get_config("mode") or "default"
     tag = get_config("tag") or None
-    plan = generate_daily_plan(
-        company=company, difficulty=difficulty, tag=tag, randomize=(mode == "random"),
-    )
+    with console.status("[bold cyan]正在获取今日计划...[/bold cyan]"):
+        plan = generate_daily_plan(
+            company=company, difficulty=difficulty, tag=tag, randomize=(mode == "random"),
+        )
     show_daily_plan(plan)
 
     choices = []
@@ -481,9 +480,9 @@ def handle_similar() -> None:
         console.print("[red]数据异常。[/red]")
         return
 
-    console.print(f"[dim]正在查找与 {problem.id}. {problem.title} 相似的题目...[/dim]")
     try:
-        similar_raw = fetch_similar_problems(problem.title_slug)
+        with console.status(f"[bold cyan]正在查找与 {problem.id}. {problem.title} 相似的题目...[/bold cyan]"):
+            similar_raw = fetch_similar_problems(problem.title_slug)
     except Exception as e:
         console.print(f"[red]获取失败: {e}[/red]")
         return
@@ -512,7 +511,8 @@ def handle_similar() -> None:
         if selected:
             from lc.leetcode_api import fetch_problem_by_slug
             try:
-                full = fetch_problem_by_slug(selected.title_slug)
+                with console.status("[bold cyan]正在获取题目...[/bold cyan]"):
+                    full = fetch_problem_by_slug(selected.title_slug)
                 start_problem(full.id)
             except Exception:
                 console.print(f"[dim]请手动开始: 做 {selected.title}[/dim]")
@@ -583,7 +583,8 @@ def handle_hot() -> None:
     from lc.agent import _arrow_select, start_problem
 
     company = get_config("company") or None
-    problems, total = fetch_hot_problems(company=company, page=1)
+    with console.status("[bold cyan]正在获取热门题目...[/bold cyan]"):
+        problems, total = fetch_hot_problems(company=company, page=1)
     if not problems:
         console.print("[yellow]暂无数据。请先用 /config 设置公司。[/yellow]")
         return

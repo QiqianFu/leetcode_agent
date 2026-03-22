@@ -138,8 +138,15 @@ def _pick_from_codetop(
     # Random mode: gather a larger pool (at least 5x limit)
     target = limit * 5 if randomize else limit
 
+    # Try server-side tag filtering first; fall back to local check only if needed
+    from lc.codetop_api import _find_tag_id
+    tag_resolved_server = tag and _find_tag_id(tag) is not None
+
     while page <= max_pages and len(candidates) < target:
-        problems, total = fetch_hot_problems(company=company, page=page, page_size=20)
+        problems, total = fetch_hot_problems(
+            company=company, tag=tag if tag_resolved_server else None,
+            page=page, page_size=20,
+        )
         if not problems:
             break
 
@@ -148,7 +155,8 @@ def _pick_from_codetop(
                 continue
             if difficulty and cp.difficulty != difficulty:
                 continue
-            if tag:
+            # If tag couldn't be resolved server-side, filter locally
+            if tag and not tag_resolved_server:
                 p = db.get_problem(cp.leetcode_id)
                 if not p or not p.tags:
                     try:
