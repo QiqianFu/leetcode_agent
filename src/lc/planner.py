@@ -56,6 +56,7 @@ def generate_daily_plan(
     difficulty: str | None = None,
     tag: str | None = None,
     randomize: bool = False,
+    max_reviews: int | None = None,
 ) -> DailyPlan:
     """Generate today's practice plan.
 
@@ -69,11 +70,14 @@ def generate_daily_plan(
     plan = DailyPlan()
 
     # 1. Pending reviews always first (deduplicate by problem_id)
-    pending = db.get_pending_reviews_by_problem()
-    for review in pending:
-        problem = db.get_problem(review.problem_id)
-        if problem:
-            plan.review_problems.append((review, problem))
+    if max_reviews != 0:
+        pending = db.get_pending_reviews_by_problem()
+        for review in pending:
+            problem = db.get_problem(review.problem_id)
+            if problem:
+                plan.review_problems.append((review, problem))
+                if max_reviews is not None and len(plan.review_problems) >= max_reviews:
+                    break
 
     # 2. New problems
     remaining = MAX_TOTAL_PROBLEMS_PER_DAY - len(plan.review_problems)

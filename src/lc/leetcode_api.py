@@ -81,6 +81,8 @@ def _html_to_text(html: str) -> str:
     from markdownify import markdownify as md
     text = md(html, heading_style="ATX", bullets="-")
     text = re.sub(r"\n{3,}", "\n\n", text)
+    # Remove surrogate characters that break UTF-8 encoding
+    text = text.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
     return text.strip()
 
 
@@ -106,9 +108,34 @@ def search_problems(keyword: str, limit: int = 5) -> list[Problem]:
     return results
 
 
+def _parse_problem_detail(title_slug: str, ac_rate: float | None = None) -> Problem:
+    """Fetch and parse full problem detail by title slug."""
+    detail_data = _graphql(PROBLEM_DETAIL_QUERY, {"titleSlug": title_slug})
+    q = detail_data["question"]
+
+    description = _html_to_text(q.get("content") or "")
+    tags = [t["name"] for t in q.get("topicTags", [])]
+
+    code_snippet = ""
+    for snippet in q.get("codeSnippets") or []:
+        if snippet.get("langSlug") == "python3":
+            code_snippet = snippet.get("code", "")
+            break
+
+    return Problem(
+        id=int(q["questionFrontendId"]),
+        title=q["title"],
+        title_slug=q["titleSlug"],
+        difficulty=q["difficulty"],
+        description=description,
+        ac_rate=ac_rate,
+        tags=tags,
+        code_snippet=code_snippet,
+    )
+
+
 def fetch_problem(problem_id: int) -> Problem:
     """Fetch a problem by its frontend ID. Two API calls: list search + detail."""
-    # Step 1: find titleSlug via search
     data = _graphql(PROBLEM_LIST_QUERY, {
         "categorySlug": "",
         "limit": 5,
@@ -124,57 +151,12 @@ def fetch_problem(problem_id: int) -> Problem:
     if match is None:
         raise ValueError(f"Problem #{problem_id} not found on LeetCode")
 
-    title_slug = match["titleSlug"]
-
-    # Step 2: fetch full detail
-    detail_data = _graphql(PROBLEM_DETAIL_QUERY, {"titleSlug": title_slug})
-    q = detail_data["question"]
-
-    description = _html_to_text(q.get("content") or "")
-    tags = [t["name"] for t in q.get("topicTags", [])]
-
-    # Extract Python3 code snippet
-    code_snippet = ""
-    for snippet in q.get("codeSnippets") or []:
-        if snippet.get("langSlug") == "python3":
-            code_snippet = snippet.get("code", "")
-            break
-
-    return Problem(
-        id=int(q["questionFrontendId"]),
-        title=q["title"],
-        title_slug=q["titleSlug"],
-        difficulty=q["difficulty"],
-        description=description,
-        ac_rate=match.get("acRate"),
-        tags=tags,
-        code_snippet=code_snippet,
-    )
+    return _parse_problem_detail(match["titleSlug"], ac_rate=match.get("acRate"))
 
 
 def fetch_problem_by_slug(title_slug: str) -> Problem:
     """Fetch a problem by its title slug."""
-    detail_data = _graphql(PROBLEM_DETAIL_QUERY, {"titleSlug": title_slug})
-    q = detail_data["question"]
-
-    description = _html_to_text(q.get("content") or "")
-    tags = [t["name"] for t in q.get("topicTags", [])]
-
-    code_snippet = ""
-    for snippet in q.get("codeSnippets") or []:
-        if snippet.get("langSlug") == "python3":
-            code_snippet = snippet.get("code", "")
-            break
-
-    return Problem(
-        id=int(q["questionFrontendId"]),
-        title=q["title"],
-        title_slug=q["titleSlug"],
-        difficulty=q["difficulty"],
-        description=description,
-        tags=tags,
-        code_snippet=code_snippet,
-    )
+    return _parse_problem_detail(title_slug)
 
 
 def fetch_problems_by_tag(tag_slug: str, limit: int = 50) -> list[Problem]:

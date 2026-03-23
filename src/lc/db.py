@@ -480,6 +480,3 @@ def get_attempted_problem_ids() -> set[int]:
     return {r["problem_id"] for r in rows}
 
 
-def get_solved_problem_ids() -> set[int]:
-    """Backward-compatible alias for attempted problem IDs."""
-    return get_attempted_problem_ids()

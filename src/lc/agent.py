@@ -614,8 +614,25 @@ class Agent:
             if all_self_contained:
                 return
 
+    @staticmethod
+    def _sanitize_messages(messages: list[dict]) -> list[dict]:
+        """Remove surrogate characters that break UTF-8 encoding."""
+        def clean(s):
+            if not isinstance(s, str):
+                return s
+            return s.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+
+        sanitized = []
+        for msg in messages:
+            msg = dict(msg)
+            if "content" in msg and isinstance(msg["content"], str):
+                msg["content"] = clean(msg["content"])
+            sanitized.append(msg)
+        return sanitized
+
     def _call_model(self, messages: list[dict]) -> tuple[str, list[dict]]:
         """Call DeepSeek with streaming. Returns (content, tool_calls)."""
+        messages = self._sanitize_messages(messages)
         stream = self.client.chat.completions.create(
             model=DEEPSEEK_MODEL,
             messages=messages,

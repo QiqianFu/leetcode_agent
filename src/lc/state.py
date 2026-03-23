@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from lc import db
 
 
@@ -26,3 +28,45 @@ def clear_current() -> None:
     db.delete_session("current_problem_id")
     db.delete_session("current_attempt_id")
     db.delete_session("current_file_path")
+
+
+# ─── Plan mode ───
+
+def is_plan_mode() -> bool:
+    return db.get_session("plan_data") is not None
+
+
+def get_plan() -> dict | None:
+    raw = db.get_session("plan_data")
+    if raw is None:
+        return None
+    return json.loads(raw)
+
+
+def set_plan(plan: dict) -> None:
+    db.set_session("plan_data", json.dumps(plan, ensure_ascii=False))
+
+
+def clear_plan() -> None:
+    db.delete_session("plan_data")
+
+
+def advance_plan() -> dict | None:
+    """Advance plan to next problem. Returns updated plan, or None if all done."""
+    plan = get_plan()
+    if plan is None:
+        return None
+    plan["current_index"] = plan.get("current_index", 0) + 1
+    if plan["current_index"] >= len(plan["problems"]):
+        clear_plan()
+        return None
+    set_plan(plan)
+    return plan
+
+
+def get_plan_progress() -> tuple[int, int] | None:
+    """Returns (current_1based, total) or None if not in plan mode."""
+    plan = get_plan()
+    if plan is None:
+        return None
+    return plan.get("current_index", 0) + 1, len(plan["problems"])

@@ -186,6 +186,34 @@ def show_hot_problems(
     console.print()
 
 
+def show_plan_problems(problems: list[dict], current_index: int, name: str = "") -> None:
+    title = f"刷题计划 — {name}" if name else "刷题计划"
+    total = len(problems)
+    table = Table(title=f"{title} ({total} 题)", border_style="magenta")
+    table.add_column("#", style="dim", width=4, justify="right")
+    table.add_column("题号", style="cyan", width=6)
+    table.add_column("题目", style="white")
+    table.add_column("难度", width=8)
+    table.add_column("状态", width=6, justify="center")
+    for i, p in enumerate(problems):
+        diff_color = DIFFICULTY_COLORS.get(p["difficulty"], "white")
+        if i < current_index:
+            status = "[green]done[/green]"
+        elif i == current_index:
+            status = "[bold cyan]→[/bold cyan]"
+        else:
+            status = "[dim]·[/dim]"
+        table.add_row(
+            str(i + 1),
+            str(p["id"]),
+            p["title"],
+            f"[{diff_color}]{p['difficulty']}[/{diff_color}]",
+            status,
+        )
+    console.print(table)
+    console.print()
+
+
 def show_companies(companies: list[dict]) -> None:
     table = Table(title="支持的公司", border_style="cyan")
     table.add_column("ID", style="dim", width=4, justify="right")

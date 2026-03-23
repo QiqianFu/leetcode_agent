@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
+
 from rich.prompt import Prompt
 from rich.panel import Panel
 
 from lc import db, state
-from lc.display import console, show_companies, show_tags
+from lc.config import DATA_DIR
+from lc.display import DIFFICULTY_COLORS, console, show_companies, show_tags
 
 DIFFICULTY_CHOICES = {"easy": "Easy", "medium": "Medium", "hard": "Hard"}
 
@@ -114,21 +117,228 @@ def handle_config() -> None:
         else:
             console.print("[dim]标签: 跳过[/dim]")
 
+    # ── 每日复习题数 ──
+    console.print()
+    current_review = get_config("max_reviews") or "不限"
+    review_count = Prompt.ask(
+        "每日复习题数",
+        choices=["0", "1", "2", "不限"],
+        default=current_review,
+    )
+    if review_count == "不限":
+        set_config("max_reviews", "")
+        console.print("[green]复习: 不限[/green]")
+    else:
+        set_config("max_reviews", review_count)
+        console.print(f"[green]每日复习题数: {review_count}[/green]")
+
     # ── 汇总 ──
     console.print()
     company_display = get_config("company") or "不限"
     diff_display = get_config("difficulty") or "不限"
     mode_display = mode_labels.get(get_config("mode") or "default", "按频率")
     tag_display = get_config("tag") or "不限"
+    review_display = get_config("max_reviews") or "不限"
     console.print(Panel(
         f"公司: [cyan]{company_display}[/cyan]\n"
         f"难度: [cyan]{diff_display}[/cyan]\n"
         f"排序: [cyan]{mode_display}[/cyan]\n"
-        f"标签: [cyan]{tag_display}[/cyan]",
+        f"标签: [cyan]{tag_display}[/cyan]\n"
+        f"复习: [cyan]{review_display} 题/天[/cyan]",
         title="当前设置",
         border_style="blue",
     ))
     console.print("[green]设置完成！[/green]\n")
+
+
+# ─── Plan mode ───
+
+def _translate_to_english(names: list[str]) -> dict[str, str]:
+    """Use DeepSeek to batch-translate Chinese LeetCode problem names to English search keywords."""
+    import json as _json
+    from openai import OpenAI
+    from lc.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+
+    if not DEEPSEEK_API_KEY:
+        return {}
+
+    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL, timeout=30)
+    prompt = (
+        "将以下 LeetCode 题目的中文名称翻译为对应的英文题目名称（用于在 leetcode.com 搜索）。\n"
+        "如果输入已经是英文，原样返回。\n"
+        "返回 JSON 对象，key 是原始输入，value 是英文名称。只返回 JSON，不要其他内容。\n\n"
+        + "\n".join(names)
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        text = resp.choices[0].message.content.strip()
+        # Strip markdown code fence if present
+        if text.startswith("```"):
+            text = re.sub(r"^```\w*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text)
+        return _json.loads(text)
+    except Exception:
+        return {}
+
+
+def handle_plan(arg: str = "") -> None:
+    """Handle /plan command: create, show, or exit plan."""
+    from lc.display import show_plan_problems
+
+    # /plan exit — quit plan mode
+    if arg in ("exit", "quit", "退出"):
+        if state.is_plan_mode():
+            state.clear_plan()
+            console.print("[green]已退出计划模式。[/green]")
+        else:
+            console.print("[dim]当前没有进行中的计划。[/dim]")
+        return
+
+    # /plan (no arg) — show current plan or create new one
+    if state.is_plan_mode():
+        plan = state.get_plan()
+        show_plan_problems(plan["problems"], plan.get("current_index", 0), plan.get("name", ""))
+        return
+
+    # Create new plan — prompt for problem list
+    console.print("\n[bold]创建刷题计划[/bold]")
+    console.print("[dim]输入题目名称（每行一题，空行结束）:[/dim]")
+
+    lines = []
+    while True:
+        try:
+            line = input()
+        except (EOFError, KeyboardInterrupt):
+            break
+        stripped = line.strip()
+        # Strip leading bullet markers like •, -, *, numbers
+        stripped = stripped.lstrip("•·–—-*● ")
+        # Strip leading numbering like "1.", "1、", "1)"
+        stripped = re.sub(r"^\d+[.、)]\s*", "", stripped)
+        stripped = stripped.strip()
+        if not stripped:
+            if lines:
+                break
+            continue
+        lines.append(stripped)
+
+    if not lines:
+        console.print("[dim]未输入题目，已取消。[/dim]")
+        return
+
+    # Optional plan name
+    name = Prompt.ask("计划名称（直接回车跳过）", default="")
+
+    # Translate Chinese names to English via AI
+    from lc.leetcode_api import search_problems
+
+    console.print("\n[dim]正在翻译题目名称...[/dim]")
+    translations = _translate_to_english(lines)
+
+    resolved = []
+    console.print("[dim]正在解析题目...[/dim]")
+    for zh_name in lines:
+        # Use AI translation if available, otherwise try the original name
+        en_keyword = translations.get(zh_name, zh_name)
+        try:
+            results = search_problems(en_keyword, limit=3)
+            if results:
+                p = results[0]
+                resolved.append({
+                    "id": p.id, "title": p.title,
+                    "title_slug": p.title_slug, "difficulty": p.difficulty,
+                })
+                diff_color = DIFFICULTY_COLORS.get(p.difficulty, "white")
+                console.print(f"  [green]✓[/green] {zh_name} → [cyan]#{p.id}[/cyan] {p.title} [{diff_color}]{p.difficulty}[/{diff_color}]")
+                continue
+        except Exception:
+            pass
+
+        # Fallback: try searching with the original Chinese name directly
+        if en_keyword != zh_name:
+            try:
+                results = search_problems(zh_name, limit=3)
+                if results:
+                    p = results[0]
+                    resolved.append({
+                        "id": p.id, "title": p.title,
+                        "title_slug": p.title_slug, "difficulty": p.difficulty,
+                    })
+                    diff_color = DIFFICULTY_COLORS.get(p.difficulty, "white")
+                    console.print(f"  [green]✓[/green] {zh_name} → [cyan]#{p.id}[/cyan] {p.title} [{diff_color}]{p.difficulty}[/{diff_color}]")
+                    continue
+            except Exception:
+                pass
+
+        console.print(f"  [red]✗[/red] {zh_name} — 未找到，已跳过")
+
+    if not resolved:
+        console.print("[red]没有解析到任何题目，已取消。[/red]")
+        return
+
+    # Deduplicate by problem id while preserving order
+    seen = set()
+    deduped = []
+    for p in resolved:
+        if p["id"] not in seen:
+            seen.add(p["id"])
+            deduped.append(p)
+    resolved = deduped
+
+    # Show plan table
+    console.print()
+    show_plan_problems(resolved, current_index=0, name=name)
+
+    confirm = Prompt.ask("开始计划？", choices=["y", "n"], default="y")
+    if confirm != "y":
+        console.print("[dim]已取消。[/dim]")
+        return
+
+    # Save plan and start first problem
+    plan = {
+        "name": name,
+        "problems": resolved,
+        "current_index": 0,
+    }
+    state.set_plan(plan)
+
+    # Skip already-attempted problems
+    attempted_ids = db.get_attempted_problem_ids()
+    while plan["current_index"] < len(plan["problems"]):
+        pid = plan["problems"][plan["current_index"]]["id"]
+        if pid not in attempted_ids:
+            break
+        console.print(f"  [dim]#{pid} 已做过，跳过[/dim]")
+        plan["current_index"] += 1
+        state.set_plan(plan)
+
+    handle_plan_next()
+
+
+def handle_plan_next() -> None:
+    """Start the next problem in the current plan."""
+    from lc.agent import start_problem
+
+    plan = state.get_plan()
+    if plan is None:
+        console.print("[dim]当前没有进行中的计划。[/dim]")
+        return
+
+    idx = plan.get("current_index", 0)
+    total = len(plan["problems"])
+
+    if idx >= total:
+        console.print("[green][Plan] 全部 {} 题完成！计划结束。[/green]".format(total))
+        state.clear_plan()
+        return
+
+    p = plan["problems"][idx]
+    console.print(f"\n[bold magenta][Plan] 第 {idx + 1}/{total} 题[/bold magenta]")
+    start_problem(p["id"])
 
 
 # ─── Prompt session ───
@@ -138,6 +348,7 @@ SLASH_COMMANDS = [
     ("/submit", "提交当前题目"),
     ("/info",   "当前做题状态"),
     ("/similar", "相似题目"),
+    ("/plan",   "创建/查看/退出刷题计划"),
     ("/status", "刷题统计"),
     ("/review", "待复习列表"),
     ("/hot",    "高频面试题"),
@@ -158,6 +369,7 @@ HELP_TEXT = """
 
 [bold]快捷指令:[/bold]
   [cyan]/today[/cyan]   今日计划（复习 + 新题）
+  [cyan]/plan[/cyan]    创建刷题计划（/plan exit 退出）
   [cyan]/status[/cyan]  刷题统计
   [cyan]/review[/cyan]  待复习列表
   [cyan]/hot[/cyan]     高频面试题
@@ -171,6 +383,7 @@ HELP_TEXT = """
 def _build_prompt_session():
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.styles import Style
 
@@ -204,6 +417,16 @@ def _build_prompt_session():
         buf.delete()
         if buf.text:
             buf.start_completion(select_first=False)
+
+    @kb.add("enter")
+    def _enter_submit(event):
+        """Enter submits the input (override multiline default)."""
+        event.current_buffer.validate_and_handle()
+
+    @kb.add("c-j")  # Ctrl+Enter sends Ctrl+J
+    def _newline(event):
+        """Ctrl+Enter inserts a newline for multi-line input."""
+        event.current_buffer.insert_text("\n")
 
     @kb.add("right")
     def _right_accept(event):
@@ -249,12 +472,15 @@ def _build_prompt_session():
 
     _ptk_menus._get_menu_item_fragments = _patched_get_fragments
 
+    history_path = str(DATA_DIR / "history")
     session = PromptSession(
         completer=SlashCompleter(),
         complete_while_typing=True,
         key_bindings=kb,
         style=style,
         reserve_space_for_menu=0,
+        history=FileHistory(history_path),
+        multiline=True,
     )
 
     # Shift completion menu to start at the beginning of typed text (not cursor)
@@ -347,6 +573,16 @@ def _build_prompt_session():
 # ─── Welcome & main loop ───
 
 def show_welcome() -> None:
+    if state.is_plan_mode():
+        plan = state.get_plan()
+        if plan:
+            name = plan.get("name", "")
+            idx = plan.get("current_index", 0)
+            total = len(plan["problems"])
+            label = f" — {name}" if name else ""
+            console.print(f"\n[bold magenta][Plan 模式]{label} ({idx + 1}/{total})[/bold magenta]\n")
+            return
+
     company = get_config("company")
     difficulty = get_config("difficulty") or "不限"
     mode = get_config("mode") or "default"
@@ -356,7 +592,9 @@ def show_welcome() -> None:
     if tag:
         mode_display += f" | 标签: {tag}"
     company_display = company or "不限"
-    console.print(f"\n[dim]当前目标: {company_display} | 难度: {difficulty} | {mode_display}[/dim]\n")
+    max_reviews = get_config("max_reviews")
+    review_display = f" | 复习: {max_reviews}题" if max_reviews else ""
+    console.print(f"\n[dim]当前目标: {company_display} | 难度: {difficulty} | {mode_display}{review_display}[/dim]\n")
 
 
 
@@ -370,9 +608,12 @@ def handle_today() -> None:
     difficulty = get_config("difficulty") or None
     mode = get_config("mode") or "default"
     tag = get_config("tag") or None
+    max_reviews_str = get_config("max_reviews")
+    max_reviews = int(max_reviews_str) if max_reviews_str else None
     with console.status("[bold cyan]正在获取今日计划...[/bold cyan]"):
         plan = generate_daily_plan(
-            company=company, difficulty=difficulty, tag=tag, randomize=(mode == "random"),
+            company=company, difficulty=difficulty, tag=tag,
+            randomize=(mode == "random"), max_reviews=max_reviews,
         )
     show_daily_plan(plan)
 
@@ -409,8 +650,7 @@ def handle_info() -> None:
     minutes = int(elapsed.total_seconds() // 60)
     time_str = f"{minutes} 分钟" if minutes > 0 else "< 1 分钟"
 
-    diff_colors = {"Easy": "green", "Medium": "yellow", "Hard": "red"}
-    dc = diff_colors.get(problem.difficulty, "white")
+    dc = DIFFICULTY_COLORS.get(problem.difficulty, "white")
     fp = state.get_file_path() or ""
 
     info = (
@@ -576,6 +816,17 @@ def handle_submit() -> None:
 
     submit_current_problem(rating)
 
+    # Plan mode: auto-advance to next problem
+    if state.is_plan_mode():
+        plan = state.advance_plan()
+        if plan is None:
+            total = 0
+            old_plan = db.get_session("plan_data")
+            # Plan was already cleared by advance_plan, print completion
+            console.print(f"\n[bold green][Plan] 全部题目完成！计划结束。[/bold green]")
+        else:
+            handle_plan_next()
+
 
 def handle_hot() -> None:
     from lc.codetop_api import fetch_hot_problems
@@ -604,11 +855,18 @@ def handle_hot() -> None:
 
 def _get_prompt() -> str:
     current = state.get_current()
+    plan_progress = state.get_plan_progress()
+    prefix = ""
+    if plan_progress:
+        cur, total = plan_progress
+        prefix = f"[{cur}/{total}] "
     if current:
         pid, _ = current
         problem = db.get_problem(pid)
         if problem:
-            return f"{pid} {problem.title} > "
+            return f"{prefix}{pid} {problem.title} > "
+    if prefix:
+        return f"{prefix}> "
     return "> "
 
 
@@ -663,8 +921,15 @@ def app() -> None:
             if text in ("/help", "帮助", "?", "？"):
                 console.print(HELP_TEXT)
                 continue
-            if text in ("/today", "/plan"):
-                handle_today()
+            if text in ("/today",):
+                if state.is_plan_mode():
+                    handle_plan_next()
+                else:
+                    handle_today()
+                continue
+            if text == "/plan" or text.startswith("/plan "):
+                arg = text[len("/plan"):].strip()
+                handle_plan(arg)
                 continue
             if text in ("/submit", "提交"):
                 handle_submit()
