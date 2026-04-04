@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 from lc.config import DB_PATH
 
-_conn: sqlite3.Connection | None = None
+_local = threading.local()
 
 
 def get_connection() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(str(DB_PATH))
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-    return _conn
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        _local.conn = conn
+    return conn
 
 
 def init_db() -> None:
@@ -32,7 +34,7 @@ def init_db() -> None:
         );
     """)
     # Drop legacy tables from old schema (one-time cleanup)
-    for table in ("problems", "problem_tags", "attempts", "reviews", "tag_stats", "schema_version", "sqlite_sequence"):
+    for table in ("problems", "problem_tags", "attempts", "reviews", "tag_stats", "schema_version"):
         conn.execute(f"DROP TABLE IF EXISTS {table}")
     conn.commit()
 

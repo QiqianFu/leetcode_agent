@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import httpx
@@ -89,31 +90,51 @@ def _find_company_id(company_name: str) -> int | None:
     return None
 
 
-def _find_tag_id(tag_name: str) -> int | None:
-    """Find CodeTop tag ID by name (exact then fuzzy, supports English abbreviations)."""
-    from lc.planner import _TAG_ZH_TO_EN
+# English -> Chinese tag mapping for CodeTop (whose tags are in Chinese)
+_TAG_EN_TO_ZH = {
+    "dynamic programming": "动态规划", "dp": "动态规划",
+    "greedy": "贪心",
+    "binary search": "二分查找",
+    "two pointers": "双指针", "sliding window": "滑动窗口",
+    "dfs": "深度优先搜索", "depth-first search": "深度优先搜索",
+    "bfs": "广度优先搜索", "breadth-first search": "广度优先搜索",
+    "backtracking": "回溯",
+    "sorting": "排序", "sort": "排序",
+    "stack": "栈", "queue": "队列",
+    "tree": "树", "binary tree": "二叉树",
+    "graph": "图", "union find": "并查集", "topological sort": "拓扑排序",
+    "design": "设计",
+    "math": "数学", "bit manipulation": "位运算",
+    "string": "字符串", "string matching": "字符串匹配",
+    "hash table": "哈希表", "array": "数组", "linked list": "链表",
+    "heap": "堆", "trie": "字典树", "segment tree": "线段树",
+    "recursion": "递归", "divide and conquer": "分治",
+}
 
+
+def _find_tag_id(tag_name: str) -> int | None:
+    """Find CodeTop tag ID by name (exact then fuzzy, supports English input)."""
     tags = fetch_tags()
     tag_lower = tag_name.lower()
-
-    # Build reverse map: English -> Chinese
-    en_to_zh = {v.lower(): k for k, v in _TAG_ZH_TO_EN.items()}
 
     # Try exact match first
     for t in tags:
         if t["name"].lower() == tag_lower:
             return t["id"]
 
-    # Try matching via Chinese name (if user typed English like "BFS")
-    # Also try the English full name from the zh->en map
-    tag_en = _TAG_ZH_TO_EN.get(tag_name, "").lower()
+    # If user typed English, translate to Chinese and match
+    zh_name = _TAG_EN_TO_ZH.get(tag_lower, "")
+    if zh_name:
+        for t in tags:
+            if t["name"] == zh_name:
+                return t["id"]
+
+    # Fuzzy match
     for t in tags:
         t_lower = t["name"].lower()
-        if tag_lower in t_lower or (tag_en and tag_en in t_lower):
+        if tag_lower in t_lower or t_lower in tag_lower:
             return t["id"]
-        # If CodeTop tag is Chinese, check if it maps to what user typed in English
-        mapped_en = _TAG_ZH_TO_EN.get(t["name"], "").lower()
-        if mapped_en and tag_lower in mapped_en:
+        if zh_name and zh_name in t["name"]:
             return t["id"]
 
     return None
@@ -128,15 +149,29 @@ def fetch_hot_problems(
     """Fetch problems sorted by frequency. Returns (problems, total_count)."""
     params: dict = {
         "page": page,
+        "page_size": page_size,
         "search": "",
         "ordering": "-frequency",
     }
-    if company:
+
+    # Resolve company_id and tag_id in parallel when both are needed
+    if company and tag:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            cid_future = pool.submit(_find_company_id, company)
+            tid_future = pool.submit(_find_tag_id, tag)
+            cid = cid_future.result()
+            tid = tid_future.result()
+        if cid is None:
+            return [], 0
+        params["company"] = cid
+        if tid is not None:
+            params["tag"] = tid
+    elif company:
         cid = _find_company_id(company)
         if cid is None:
             return [], 0
         params["company"] = cid
-    if tag:
+    elif tag:
         tid = _find_tag_id(tag)
         if tid is not None:
             params["tag"] = tid

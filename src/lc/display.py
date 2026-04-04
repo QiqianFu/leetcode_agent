@@ -5,10 +5,14 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
+from typing import TYPE_CHECKING
+
 from rich.theme import Theme
 
-from lc.codetop_api import CodetopProblem
 from lc.models import Problem
+
+if TYPE_CHECKING:
+    from lc.codetop_api import CodetopProblem
 
 _THEME = Theme({
     "markdown.code": "bold cyan",
@@ -46,14 +50,12 @@ def show_daily_plan(plan) -> None:
         table.add_column("#", style="cyan", width=6)
         table.add_column("题目", style="white")
         table.add_column("难度", width=8)
-        table.add_column("标签", style="dim")
         for problem in plan.new_problems:
             diff_color = DIFFICULTY_COLORS.get(problem.difficulty, "white")
             table.add_row(
                 str(problem.id),
                 problem.title,
                 f"[{diff_color}]{problem.difficulty}[/{diff_color}]",
-                ", ".join(problem.tags[:3]),
             )
         console.print(table)
 

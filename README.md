@@ -117,7 +117,10 @@ tail -f ~/.leetcode_agent/agent.log
 ```
 src/lc/
 ├── cli.py           — 命令入口 & REPL 主循环
-├── agent.py         — ReAct Agent（DeepSeek + tool calling）
+├── agent.py         — ReAct Agent 核心（chat loop, streaming, LLM client）
+├── tools.py         — 13 个工具定义 + 实现 + dispatcher
+├── workspace.py     — 文件/分类 helpers（解题文件创建, AI 分类, start_problem）
+├── ui.py            — 终端交互（箭头选择器, 渲染 helpers）
 ├── db.py            — SQLite 数据访问（记忆索引 + 配置）
 ├── models.py        — 数据模型（Problem）
 ├── config.py        — 环境变量 & 配置加载

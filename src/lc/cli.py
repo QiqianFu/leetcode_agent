@@ -347,6 +347,16 @@ def _build_prompt_session():
 # ─── Welcome & main loop ───
 
 def show_welcome() -> None:
+    from importlib.metadata import version as pkg_version
+    from pathlib import Path
+    from lc.config import DEEPSEEK_MODEL
+
+    try:
+        ver = pkg_version("leetcode-agent")
+    except Exception:
+        ver = "0.1.0"
+    cwd = Path.cwd()
+
     company = get_config("company")
     difficulty = get_config("difficulty") or "不限"
     mode = get_config("mode") or "default"
@@ -356,26 +366,21 @@ def show_welcome() -> None:
     if tag:
         mode_display += f" | 标签: {tag}"
     company_display = company or "不限"
-    console.print(f"\n[dim]当前目标: {company_display} | 难度: {difficulty} | {mode_display}[/dim]\n")
+    config_line = f"目标: {company_display} | 难度: {difficulty} | {mode_display}"
+
+    c = "dark_goldenrod"
+    logo = (
+        f"[{c}]▄    ▄███▄  ▄▄▄[/]   [bold]LeetCode Agent[/bold] v{ver}\n"
+        f"[{c}]█   ██ █ █  █[/]    [dim]{DEEPSEEK_MODEL} · {cwd}[/dim]\n"
+        f"[{c}]█▄▄  ▀█▀█▀  █▄▄[/]   [dim]{config_line}[/dim]"
+    )
+    console.print(logo)
 
 
 
 def app() -> None:
     """Main REPL entry point."""
     db.init_db()
-
-    from importlib.metadata import version as pkg_version
-    from pathlib import Path
-    from lc.config import DEEPSEEK_MODEL
-    try:
-        ver = pkg_version("leetcode-agent")
-    except Exception:
-        ver = "0.1.0"
-    cwd = Path.cwd()
-    console.print(
-        f"[bold]LeetCode Agent[/bold] v{ver}  "
-        f"[dim]{DEEPSEEK_MODEL} · {cwd}[/dim]"
-    )
     show_welcome()
 
     from lc.agent import Agent
