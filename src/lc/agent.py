@@ -1,64 +1,148 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from datetime import datetime
+import time
 from pathlib import Path
 
 from openai import OpenAI
-from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
-from rich.theme import Theme
 
-from lc import db, state
-from lc.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from lc import db
+from lc.config import (
+    DATA_DIR,
+    DEBUG,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL,
+    MAX_AGENT_HISTORY_MESSAGES,
+)
+from lc.display import console
 from lc.models import CATEGORIES, Problem
 
-_THEME = Theme({
-    "markdown.code": "bold cyan",
-    "markdown.code_block": "cyan",
-})
-console = Console(theme=_THEME)
+# ─── Logging setup ───
+
+logger = logging.getLogger("lc.agent")
+
+def _setup_logging():
+    if not DEBUG:
+        logger.setLevel(logging.WARNING)
+        return
+    logger.setLevel(logging.DEBUG)
+    log_file = DATA_DIR / "agent.log"
+    handler = logging.FileHandler(log_file, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
+    ))
+    logger.addHandler(handler)
+    logger.debug("=== session start ===")
+
+_setup_logging()
 
 SYSTEM_PROMPT = """\
-你是一个 LeetCode 刷题助手，在终端中和用户自由对话。
+你是一个 LeetCode 刷题助手，在终端中和用户自由对话。用中文回答，简洁直接。
 
-你的职责：
-- 帮用户选题、开始做题
-- 阅读用户写的代码，给出提示（先引导思考，不要直接给答案）
-- 用户明确要求讲解时，才给出完整解题思路
-- 帮用户提交结果、管理复习计划
+## 角色
+- 帮用户选题、做题、复习
+- 给提示时先引导思考，用户明确要求讲解时才给完整思路
+- 用户意图明确时直接执行，不要反复确认
 
-重要原则：
-- 用户的意图明确时，直接执行，不要反复确认。比如用户说"放弃"就直接放弃，说"提交"就直接问评分然后提交。
-- 不要做多余的 double check，用户既然说了就是确定了。
+## 可用工具
+你可以自主决定何时、以什么顺序调用工具。每轮你可以思考、调用工具、观察结果，然后决定下一步。
 
-使用工具的时机：
-- 用户要提示 → 先 read_solution 读代码，然后调 count_hint 记录，再给提示
-- 用户要讲解 → 先 read_solution 读代码，然后调 count_teach 记录，再给讲解
-- 用户想看代码 → read_solution
-- 用户想做某道题（给了题号） → start_problem
-- 用户提到了题目名称但没给题号（如"走楼梯那题"、"两数之和"、"LRU缓存"） → 先用 search_problem 搜索（关键词必须用英文，你自行翻译），搜到结果后让用户选择
-- 用户想刷题但没指定题号（如"开始"、"来一道"、"刷题"等） → 直接调 pick_problem，不要反问
-- 用户想刷特定类型的题（如"来一道堆的题"、"给我一道动态规划"） → 如果用户没有指定难度，必须先反问"想要什么难度？Easy / Medium / Hard / 不限"，拿到回答后再调 pick_problem 传 tag（和 difficulty）
-- 用户说做完了/结束/想提交/完成了 → 直接调 finish_problem 触发提交流程
-- 用户要放弃当前题 → 直接 abandon_problem
-- 查看计划/统计/复习/高频 → 告诉用户用斜杠命令：/today, /status, /review, /hot
+## 工具协作
+- pick_problem / search_problem 返回的是用户选中的题目信息（selected_id），你需要接着调 start_problem 来真正开始做题（创建本地文件等）
+- start_problem 返回 problem_id、file 路径和 memory_file 路径。后续如果忘了 file_path，可先调 find_problem_file 按 problem_id 找回
+- 用户提到某道已存在的题、或想继续之前的题时，先调 check_problem 获取题目状态；需要文件时再调 find_problem_file
+- read_solution / append_solution 需要 file_path 参数
+- 如果只记得题号，可用 find_problem_file 找回本地文件
+- 如果只记得题目名关键词，可用 search_workspace_files 搜当前工作区里的题目文件
+- 如果只记得题型/文件夹，可用 list_category_problems 查看当前工作区对应分类目录
 
-自评分标准：1=轻松搞定 2=稍有思考 3=想了一阵 4=很吃力 5=没做出来
+## 记忆系统
+每道题都有一个对应的 markdown 记忆文件。你可以用 read_memory / write_memory 来读写题目的记忆。
+- 做题过程中的提示、讲解、心得、难点、错误思路等，都应该记录到记忆文件中
+- 用户说「提交」或做完题时，用 write_memory 把做题总结写入记忆文件
+- 用户问复习、回顾时，读取相关题目的记忆文件来判断
 
-用中文回答。简洁直接。"""
+## 注意事项
+- search_problem 只支持英文关键词，需要时自行翻译
+- 本地文件搜索范围严格限制在当前工作区（当前 CLI 启动目录）内
+- 用户想看今日计划、高频题时，直接调用对应工具（get_daily_plan, get_hot_problems）"""
 
 TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "check_problem",
+            "description": "按题号查询题目信息。返回题目元信息和是否有记忆文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "problem_id": {"type": "integer", "description": "题目编号"},
+                },
+                "required": ["problem_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_solution",
-            "description": "读取用户当前的解题代码文件",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "读取用户的解题代码文件",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "解题文件路径"},
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_problem_file",
+            "description": "在当前工作区内按题号查找本地解题文件。只搜索当前 CLI 启动目录及其子目录，不查询 LeetCode 线上题库。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "problem_id": {"type": "integer", "description": "题目编号"},
+                },
+                "required": ["problem_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_workspace_files",
+            "description": "在当前工作区内按文件名关键词搜索本地题目文件。适合用户只记得题目名或部分关键词时使用。只搜索本地工作区，不查询 LeetCode 线上题库。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "文件名或题目关键词"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_category_problems",
+            "description": "列出当前工作区内某个分类文件夹下的题目文件。适合用户只记得题型或文件夹名时使用。只查看本地工作区目录，不查询 LeetCode 线上题库。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "分类/文件夹名，如 dp、graph、tree、string"},
+                },
+                "required": ["category"],
+            },
         },
     },
     {
@@ -69,9 +153,10 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "file_path": {"type": "string", "description": "解题文件路径"},
                     "content": {"type": "string", "description": "参考解法代码"},
                 },
-                "required": ["content"],
+                "required": ["file_path", "content"],
             },
         },
     },
@@ -79,20 +164,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "pick_problem",
-            "description": "抽题并开始。无参数时按用户配置抽题；传 tag 时无视配置，按频率抽该标签的题。",
+            "description": "按用户 /config 中的配置抽题（公司、难度、标签、排序模式）。不接受参数，直接使用已有配置。如果用户用自然语言指定了想刷的题目类型，应使用 search_problem 而非此工具。",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "tag": {
-                        "type": "string",
-                        "description": "指定标签（如 堆、动态规划、链表），按频率抽该标签的题",
-                    },
-                    "difficulty": {
-                        "type": "string",
-                        "enum": ["Easy", "Medium", "Hard"],
-                        "description": "指定难度，用户不需要时不传",
-                    },
-                },
+                "properties": {},
             },
         },
     },
@@ -127,42 +202,61 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "finish_problem",
-            "description": "结束当前题目，触发评分提交流程。用户说做完了、结束、完成了、想提交时调用。",
-            "parameters": {"type": "object", "properties": {}},
+            "name": "read_memory",
+            "description": "读取某道题的记忆文件内容。用于回顾做题记录、判断是否需要复习等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "problem_id": {"type": "integer", "description": "题目编号"},
+                },
+                "required": ["problem_id"],
+            },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "abandon_problem",
-            "description": "放弃当前题目",
-            "parameters": {"type": "object", "properties": {}},
+            "name": "write_memory",
+            "description": "写入或追加内容到某道题的记忆文件。记录做题心得、难点、提示使用、总结等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "problem_id": {"type": "integer", "description": "题目编号"},
+                    "content": {"type": "string", "description": "要写入的内容（markdown 格式）"},
+                    "mode": {"type": "string", "enum": ["append", "overwrite"], "description": "写入模式：append 追加，overwrite 覆盖。默认 append"},
+                },
+                "required": ["problem_id", "content"],
+            },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "count_hint",
-            "description": "记录一次提示使用（给提示前必须调用）",
-            "parameters": {"type": "object", "properties": {}},
+            "name": "get_daily_plan",
+            "description": "生成今日刷题计划（新题推荐），基于用户 /config 中的设置",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "count_teach",
-            "description": "记录一次讲解使用（给讲解前必须调用）",
-            "parameters": {"type": "object", "properties": {}},
+            "name": "get_hot_problems",
+            "description": "查看高频题列表（从 CodeTop 获取，按用户配置的公司/标签筛选）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "公司名（可选，默认用 /config 中的设置）"},
+                    "tag": {"type": "string", "description": "标签名（可选，默认用 /config 中的设置）"},
+                },
+            },
         },
     },
 ]
 
 
-# Tools that don't need an AI follow-up response
-_SELF_CONTAINED_TOOLS = {
-    "abandon_problem", "pick_problem", "finish_problem",
-}
 
 
 # ─── Terminal helpers ───
@@ -324,6 +418,45 @@ def _detect_imports(snippet: str) -> str:
     return "\n".join(lines)
 
 
+def _workspace_root() -> Path:
+    """Readonly workspace root for local lookup tools."""
+    return Path.cwd().resolve()
+
+
+def _problem_files_in_workspace() -> list[Path]:
+    root = _workspace_root()
+    return sorted(
+        (p for p in root.rglob("*.py") if p.is_file()),
+        key=lambda p: str(p.relative_to(root)),
+    )
+
+
+def _relative_workspace_path(path: Path) -> str:
+    return str(path.resolve().relative_to(_workspace_root()))
+
+
+def _extract_problem_id(path: Path) -> int | None:
+    m = re.match(r"^(\d+)_", path.stem)
+    return int(m.group(1)) if m else None
+
+
+def _workspace_file_payload(path: Path) -> dict:
+    payload = {"file_path": _relative_workspace_path(path)}
+    problem_id = _extract_problem_id(path)
+    if problem_id is not None:
+        payload["problem_id"] = problem_id
+    return payload
+
+
+_llm_client: OpenAI | None = None
+
+def _get_llm_client() -> OpenAI:
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL, timeout=60)
+    return _llm_client
+
+
 def _classify_problem(problem: Problem) -> str:
     """Use AI to classify a problem into one of the predefined categories."""
     categories_str = ", ".join(CATEGORIES)
@@ -339,8 +472,7 @@ def _classify_problem(problem: Problem) -> str:
         prompt += f"描述: {problem.description[:200]}\n"
 
     try:
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL, timeout=30)
-        resp = client.chat.completions.create(
+        resp = _get_llm_client().chat.completions.create(
             model=DEEPSEEK_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
@@ -357,19 +489,48 @@ def _classify_problem(problem: Problem) -> str:
     return _pick_category_heuristic(problem.tags)
 
 
-_DATA_STRUCTURE_TAGS = {
-    "array", "string", "hash table", "linked list", "stack", "queue",
-    "tree", "binary tree", "binary search tree", "graph", "matrix",
-    "doubly-linked list", "heap (priority queue)",
+_TAG_TO_CATEGORY = {
+    # dp
+    "dynamic programming": "dp", "memoization": "dp",
+    # greedy
+    "greedy": "greedy",
+    # binary_search
+    "binary search": "binary_search",
+    # two_pointers
+    "two pointers": "two_pointers", "sliding window": "two_pointers",
+    # dfs_bfs
+    "depth-first search": "dfs_bfs", "breadth-first search": "dfs_bfs",
+    "backtracking": "dfs_bfs", "recursion": "dfs_bfs",
+    # sorting
+    "sorting": "sorting", "heap (priority queue)": "sorting",
+    "merge sort": "sorting", "quickselect": "sorting", "counting sort": "sorting",
+    "bucket sort": "sorting", "radix sort": "sorting",
+    # stack_queue
+    "stack": "stack_queue", "queue": "stack_queue",
+    "monotonic stack": "stack_queue", "monotonic queue": "stack_queue",
+    # tree
+    "tree": "tree", "binary tree": "tree", "binary search tree": "tree",
+    "trie": "tree", "segment tree": "tree", "binary indexed tree": "tree",
+    # graph
+    "graph": "graph", "topological sort": "graph", "union find": "graph",
+    "shortest path": "graph", "minimum spanning tree": "graph",
+    # design
+    "design": "design",
+    # math_bit
+    "math": "math_bit", "bit manipulation": "math_bit",
+    "number theory": "math_bit", "combinatorics": "math_bit", "geometry": "math_bit",
+    # string
+    "string": "string", "string matching": "string",
 }
 
 
 def _pick_category_heuristic(tags: list[str]) -> str:
-    """Fallback: pick an algorithm-type tag over data-structure tags for folder name."""
+    """Fallback: map LeetCode tags to one of the 12 categories."""
     for tag in tags:
-        if tag.lower() not in _DATA_STRUCTURE_TAGS:
-            return tag
-    return tags[0] if tags else "other"
+        cat = _TAG_TO_CATEGORY.get(tag.lower())
+        if cat:
+            return cat
+    return "dp"
 
 
 def _create_solution_file(problem: Problem) -> Path:
@@ -415,100 +576,61 @@ def _create_solution_file(problem: Problem) -> Path:
     return file_path
 
 
+def _memory_dir() -> Path:
+    """Directory for problem memory markdown files."""
+    d = Path.cwd() / ".memories"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def _get_memory_path(problem: Problem) -> Path:
+    """Get the memory file path for a problem."""
+    return _memory_dir() / f"{problem.id}_{_slugify(problem.title)}.md"
+
+
+def _create_memory_file(problem: Problem) -> Path:
+    """Create an initial memory file for a problem."""
+    memory_path = _get_memory_path(problem)
+    if memory_path.exists():
+        return memory_path
+
+    lines = [
+        f"# {problem.id}. {problem.title}",
+        f"- 难度: {problem.difficulty}",
+        f"- 标签: {', '.join(problem.tags)}",
+        f"- 链接: https://leetcode.com/problems/{problem.title_slug}/",
+        "",
+    ]
+    memory_path.write_text("\n".join(lines), encoding="utf-8")
+    return memory_path
+
+
 # ─── Shared actions ───
 
-def submit_current_problem(rating: int, notes: str = None) -> str:
-    """Submit current problem with rating. Used by both Agent and /submit command."""
-    current = state.get_current()
-    if not current:
-        return "当前没有在做题。"
-    if not rating or rating < 1 or rating > 5:
-        return "评分需要在 1-5 之间。"
+def start_problem(problem_id: int) -> tuple[Problem, Path, Path] | str:
+    """Start a problem. Returns (problem, solution_path, memory_path) on success, error str on failure."""
+    try:
+        from lc.leetcode_api import fetch_problem
+        with console.status("[bold cyan]正在获取题目...[/bold cyan]"):
+            problem = fetch_problem(problem_id)
+    except Exception as e:
+        return f"获取题目失败: {e}"
 
-    pid, aid = current
-    problem = db.get_problem(pid)
-    attempt = db.get_attempt(aid)
-    if not problem or not attempt:
-        return "数据异常。"
-
-    db.finish_attempt(aid, rating, notes)
-    attempt = db.get_attempt(aid)
-
-    from lc.scheduler import handle_review_submit, schedule_review
-
-    active_review = db.get_active_review_for_problem(pid)
-    reviews_scheduled = 0
-
-    if active_review:
-        # One review session should clear all overdue review entries for the same problem.
-        db.complete_due_reviews(pid)
-        new_reviews, should_cancel = handle_review_submit(active_review, rating)
-        if should_cancel:
-            db.cancel_future_reviews(pid)
-        if new_reviews:
-            db.insert_reviews(new_reviews)
-            reviews_scheduled = len(new_reviews)
-    else:
-        reviews = schedule_review(pid, rating, attempt.hints_used, attempt.teach_used)
-        if reviews:
-            db.insert_reviews(reviews)
-            reviews_scheduled = len(reviews)
-
-    db.update_tag_stats(pid)
-
-    started = datetime.fromisoformat(attempt.started_at)
-    elapsed = datetime.utcnow() - started
-    minutes = int(elapsed.total_seconds() // 60)
-    time_str = f"{minutes} 分钟" if minutes > 0 else "< 1 分钟"
-
-    # Save undo info before clearing state
-    fp = state.get_file_path() or ""
-    db.set_session("last_submit", json.dumps({
-        "problem_id": pid,
-        "attempt_id": aid,
-        "rating": rating,
-        "file_path": fp,
-    }))
-
-    state.clear_current()
-
-    from lc.display import show_submit_summary
-    show_submit_summary(problem, rating, reviews_scheduled, time_str)
-    return "已提交。"
-
-
-def start_problem(problem_id: int) -> tuple[Problem, Path] | str:
-    """Start a problem. Returns (problem, rel_path) on success, error str on failure."""
-    state.clear_current()
-
-    problem = db.get_problem(problem_id)
-    if problem is None or problem.description is None:
-        try:
-            from lc.leetcode_api import fetch_problem
-            with console.status("[bold cyan]正在获取题目...[/bold cyan]"):
-                problem = fetch_problem(problem_id)
-                db.upsert_problem(problem)
-        except Exception as e:
-            return f"获取题目失败: {e}"
-
-    # AI classify if not already categorized
-    if not problem.category:
-        with console.status("[bold cyan]分类中...[/bold cyan]"):
-            problem.category = _classify_problem(problem)
-            db.set_problem_category(problem.id, problem.category)
+    # AI classify
+    with console.status("[bold cyan]分类中...[/bold cyan]"):
+        problem.category = _classify_problem(problem)
 
     file_path = _create_solution_file(problem)
-    attempt_id = db.create_attempt(problem_id)
-    state.set_current(problem_id, attempt_id, file_path=str(file_path))
+    memory_path = _create_memory_file(problem)
 
-    url = f"https://leetcode.com/problems/{problem.title_slug}/"
+    # Register in memory index
+    rel_memory = str(memory_path.relative_to(Path.cwd()))
+    db.upsert_memory(problem.id, problem.title, rel_memory,
+                     difficulty=problem.difficulty,
+                     tags=", ".join(problem.tags))
+
     rel_path = file_path.relative_to(Path.cwd())
-    console.print(f"[green]已开始: {problem.id}. {problem.title} ({problem.difficulty})[/green]")
-    console.print(f"[dim]🔗 {url}[/dim]")
-    console.print(f"[dim]📄 {rel_path}[/dim]")
-    console.print(f"[dim]输入「提示」「讲解」获取帮助，/submit 提交，「放弃」跳过[/dim]")
-
-    return problem, rel_path
+    return problem, rel_path, memory_path
 
 
 # ─── Agent ───
@@ -518,72 +640,41 @@ class Agent:
         if not DEEPSEEK_API_KEY:
             console.print("[red]错误: 请在 .env 文件中设置 DEEPSEEK_API_KEY[/red]")
             raise SystemExit(1)
-        self.client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL, timeout=60)
+        self.client = _get_llm_client()
         self.messages: list[dict] = []
-        self._pending_clear = False
-
-    def _build_system_prompt(self) -> str:
-        parts = [SYSTEM_PROMPT]
-
-        current = state.get_current()
-        if current:
-            pid, aid = current
-            problem = db.get_problem(pid)
-            attempt = db.get_attempt(aid)
-            if problem:
-                parts.append(f"\n[当前题目] {problem.id}. {problem.title} ({problem.difficulty})")
-                from lc.models import CATEGORY_LABELS
-                cat_label = CATEGORY_LABELS.get(problem.category, "") if problem.category else ""
-                if cat_label:
-                    parts.append(f"题型: {cat_label}")
-                parts.append(f"标签: {', '.join(problem.tags)}")
-                fp = state.get_file_path()
-                if fp:
-                    parts.append(f"文件: {fp}")
-                if attempt:
-                    parts.append(f"已用提示: {attempt.hints_used}次, 讲解: {attempt.teach_used}次")
-                if problem.description:
-                    parts.append(f"\n题目描述:\n{problem.description}")
-        else:
-            parts.append("\n当前没有在做题。用户说开始/刷题等，直接调 pick_problem。")
-
-        return "\n".join(parts)
 
     def chat(self, user_input: str):
         """Process user message through the agent loop."""
         _flush_stdin()
-        if self._pending_clear:
-            self.messages.clear()
-            self._pending_clear = False
+
+        if len(self.messages) >= MAX_AGENT_HISTORY_MESSAGES:
+            console.print(
+                f"[yellow]当前会话已达到长度上限（{MAX_AGENT_HISTORY_MESSAGES} 条消息），"
+                "请使用 /clear 开启新会话后继续。[/yellow]"
+            )
+            logger.warning("history limit reached: %d messages", len(self.messages))
+            return
+
         self.messages.append({"role": "user", "content": user_input})
+        logger.debug("user: %s", user_input)
 
-        # Keep history manageable — find safe truncation point
-        if len(self.messages) > 40:
-            # Start from position -30 and scan forward to find a safe cut point
-            # (not in the middle of a tool_call/tool_result pair)
-            cut = len(self.messages) - 30
-            while cut < len(self.messages):
-                msg = self.messages[cut]
-                if msg["role"] in ("tool",):
-                    # Don't start with an orphan tool result — move forward
-                    cut += 1
-                elif msg["role"] == "assistant" and msg.get("tool_calls"):
-                    # Don't start with an assistant tool_call without its results
-                    cut += 1
-                else:
-                    break
-            self.messages = self.messages[cut:]
+        # Static system prompt → KV cache prefix stays stable across calls
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.messages
 
-        messages = [{"role": "system", "content": self._build_system_prompt()}] + self.messages
-
-        for _ in range(8):  # max tool-call iterations
-            content, tool_calls = self._call_model(messages)
+        # ReAct loop: think → act → observe → repeat until no more tool calls
+        for step in range(16):  # safety limit
+            content, tool_calls, usage = self._call_model(messages)
+            logger.debug("step %d | tokens: %s | tools: %s | response: %s",
+                         step, usage,
+                         [tc["name"] for tc in tool_calls] if tool_calls else "none",
+                         (content[:100] + "...") if content and len(content) > 100 else content)
 
             if not tool_calls:
+                # No tool calls — final response, done
                 self.messages.append({"role": "assistant", "content": content})
                 return
 
-            # Add assistant message with tool calls
+            # Add assistant message with thinking + tool calls
             assistant_msg = {
                 "role": "assistant",
                 "content": content or None,
@@ -599,20 +690,24 @@ class Agent:
             messages.append(assistant_msg)
             self.messages.append(assistant_msg)
 
-            # Execute each tool
-            all_self_contained = True
+            # Execute each tool and feed results back
             for tc in tool_calls:
                 console.print(f"[dim]  ⚙ {tc['name']}[/dim]")
+                t0 = time.time()
                 result = self._execute_tool(tc["name"], tc["arguments"])
+                elapsed = time.time() - t0
+                logger.debug("tool %s(%s) → %.1fs | result: %s",
+                             tc["name"], tc["arguments"],
+                             elapsed,
+                             (result[:200] + "...") if len(result) > 200 else result)
                 tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
                 messages.append(tool_msg)
                 self.messages.append(tool_msg)
-                if tc["name"] not in _SELF_CONTAINED_TOOLS:
-                    all_self_contained = False
 
-            # Self-contained tools don't need AI follow-up
-            if all_self_contained:
-                return
+            # Loop continues — model will see tool results and decide next step
+
+        logger.warning("ReAct loop hit 16-step limit")
+        console.print("[yellow]（已达到单轮推理上限，请继续对话）[/yellow]")
 
     @staticmethod
     def _sanitize_messages(messages: list[dict]) -> list[dict]:
@@ -630,24 +725,41 @@ class Agent:
             sanitized.append(msg)
         return sanitized
 
-    def _call_model(self, messages: list[dict]) -> tuple[str, list[dict]]:
-        """Call DeepSeek with streaming. Returns (content, tool_calls)."""
+    def _call_model(self, messages: list[dict]) -> tuple[str, list[dict], dict]:
+        """Call DeepSeek with streaming. Returns (content, tool_calls, usage)."""
         messages = self._sanitize_messages(messages)
+        logger.debug("calling model with %d messages", len(messages))
+        if DEBUG:
+            logger.debug("messages dump:\n%s", json.dumps(messages, ensure_ascii=False, indent=2))
+        t0 = time.time()
         stream = self.client.chat.completions.create(
             model=DEEPSEEK_MODEL,
             messages=messages,
             tools=TOOLS,
             stream=True,
+            stream_options={"include_usage": True},
             temperature=0.3,
             max_tokens=4096,
         )
 
         content = ""
         tool_calls_map: dict[int, dict] = {}
+        usage = {}
         live = None
 
         try:
             for chunk in stream:
+                # Capture usage from the final chunk
+                if chunk.usage:
+                    usage = {
+                        "prompt": chunk.usage.prompt_tokens,
+                        "completion": chunk.usage.completion_tokens,
+                        "total": chunk.usage.total_tokens,
+                    }
+                    # Include cache info if available
+                    if hasattr(chunk.usage, "prompt_cache_hit_tokens"):
+                        usage["cache_hit"] = chunk.usage.prompt_cache_hit_tokens
+
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -675,21 +787,31 @@ class Agent:
             if live is not None:
                 live.stop()
 
+        elapsed = time.time() - t0
+        logger.debug("model responded in %.1fs | usage: %s", elapsed, usage)
+
         tool_calls = [tool_calls_map[k] for k in sorted(tool_calls_map)] if tool_calls_map else []
-        return content, tool_calls
+        return content, tool_calls, usage
 
     def _execute_tool(self, name: str, arguments: str) -> str:
         args = json.loads(arguments) if arguments else {}
         handlers = {
-            "read_solution": lambda: self._tool_read_solution(),
-            "append_solution": lambda: self._tool_append_solution(args.get("content", "")),
+            "check_problem": lambda: self._tool_check_problem(problem_id=args.get("problem_id")),
+            "read_solution": lambda: self._tool_read_solution(args.get("file_path", "")),
+            "find_problem_file": lambda: self._tool_find_problem_file(args.get("problem_id")),
+            "search_workspace_files": lambda: self._tool_search_workspace_files(args.get("keyword", "")),
+            "list_category_problems": lambda: self._tool_list_category_problems(args.get("category", "")),
+            "append_solution": lambda: self._tool_append_solution(
+                args.get("file_path", ""), args.get("content", "")),
             "search_problem": lambda: self._tool_search_problem(args.get("keyword", "")),
-            "pick_problem": lambda: self._tool_pick_problem(tag=args.get("tag"), difficulty=args.get("difficulty")),
+            "pick_problem": lambda: self._tool_pick_problem(),
             "start_problem": lambda: self._tool_start_problem(args.get("problem_id")),
-            "finish_problem": lambda: self._tool_finish_problem(),
-            "abandon_problem": lambda: self._tool_abandon(),
-            "count_hint": lambda: self._tool_count_hint(),
-            "count_teach": lambda: self._tool_count_teach(),
+            "read_memory": lambda: self._tool_read_memory(args.get("problem_id")),
+            "write_memory": lambda: self._tool_write_memory(
+                args.get("problem_id"), args.get("content", ""), args.get("mode", "append")),
+            "get_daily_plan": lambda: self._tool_get_daily_plan(),
+            "get_hot_problems": lambda: self._tool_get_hot_problems(
+                company=args.get("company"), tag=args.get("tag")),
         }
         handler = handlers.get(name)
         if not handler:
@@ -701,28 +823,145 @@ class Agent:
 
     # ─── Tool implementations ───
 
-    def _tool_read_solution(self) -> str:
-        fp = state.get_file_path()
-        if not fp:
-            return "当前没有解题文件。请先开始一道题。"
-        p = Path(fp)
+    def _tool_check_problem(self, problem_id: int | None = None) -> str:
+        """Look up problem metadata by problem ID."""
+        if not problem_id:
+            return "请传入 problem_id。"
+
+        memory = db.get_memory(problem_id)
+
+        result = {"problem_id": problem_id}
+        if memory:
+            result.update({
+                "has_memory": True,
+                "title": memory["title"],
+                "difficulty": memory["difficulty"],
+                "tags": memory["tags"],
+                "memory_file": memory["memory_file"],
+            })
+        else:
+            result["has_memory"] = False
+            # Try fetching from LeetCode API
+            try:
+                from lc.leetcode_api import fetch_problem
+                problem = fetch_problem(problem_id)
+                result.update({
+                    "title": problem.title,
+                    "difficulty": problem.difficulty,
+                    "tags": problem.tags,
+                })
+            except Exception:
+                result["message"] = "未找到该题目信息。"
+        return json.dumps(result, ensure_ascii=False)
+
+    def _tool_read_solution(self, file_path: str) -> str:
+        if not file_path:
+            return "请传入 file_path 参数。"
+        p = Path(file_path).resolve()
+        if not str(p).startswith(str(_workspace_root())):
+            return f"路径不在工作区内: {file_path}"
         if not p.exists():
-            return f"文件不存在: {fp}"
+            return f"文件不存在: {file_path}"
         return p.read_text(encoding="utf-8")
 
-    def _tool_append_solution(self, content: str) -> str:
-        fp = state.get_file_path()
-        if not fp:
-            return "当前没有解题文件。"
-        p = Path(fp)
+    def _tool_find_problem_file(self, problem_id: int | None = None) -> str:
+        if not problem_id:
+            return "请传入 problem_id。"
+        matches = list(_workspace_root().glob(f"**/{problem_id}_*.py"))
+        if not matches:
+            return json.dumps(
+                {"problem_id": problem_id, "found": False, "message": f"当前工作区内未找到第 {problem_id} 题的本地文件。"},
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "problem_id": problem_id,
+                "found": True,
+                "file": _relative_workspace_path(matches[0]),
+            },
+            ensure_ascii=False,
+        )
+
+    def _tool_search_workspace_files(self, keyword: str) -> str:
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return "请传入 keyword。"
+
+        needle = keyword.lower().replace(" ", "_")
+        matches = []
+        for path in _problem_files_in_workspace():
+            rel = _relative_workspace_path(path)
+            haystacks = {
+                path.stem.lower(),
+                rel.lower(),
+                path.parent.name.lower(),
+            }
+            if any(needle in h or keyword.lower() in h for h in haystacks):
+                matches.append(_workspace_file_payload(path))
+            if len(matches) >= 10:
+                break
+
+        return json.dumps(
+            {
+                "keyword": keyword,
+                "matches": matches,
+                "count": len(matches),
+            },
+            ensure_ascii=False,
+        )
+
+    def _tool_list_category_problems(self, category: str) -> str:
+        category = (category or "").strip()
+        if not category:
+            return "请传入 category。"
+
+        root = _workspace_root()
+        raw = category.lower()
+        normalized = _slugify(category)
+        matched_dirs = []
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            name = child.name.lower()
+            if name == raw or name == normalized or raw in name or normalized in name:
+                matched_dirs.append(child)
+
+        if not matched_dirs:
+            return json.dumps(
+                {"category": category, "matches": [], "count": 0, "message": "当前工作区内未找到匹配的分类目录。"},
+                ensure_ascii=False,
+            )
+
+        directory = sorted(matched_dirs, key=lambda p: p.name)[0]
+        files = sorted(
+            (p for p in directory.glob("*.py") if p.is_file()),
+            key=lambda p: p.name,
+        )
+        matches = [_workspace_file_payload(path) for path in files[:50]]
+        return json.dumps(
+            {
+                "category": category,
+                "directory": _relative_workspace_path(directory),
+                "matches": matches,
+                "count": len(matches),
+            },
+            ensure_ascii=False,
+        )
+
+    def _tool_append_solution(self, file_path: str, content: str) -> str:
+        if not file_path:
+            return "请传入 file_path 参数。"
+        p = Path(file_path).resolve()
+        if not str(p).startswith(str(_workspace_root())):
+            return f"路径不在工作区内: {file_path}"
         if not p.exists():
-            return f"文件不存在: {fp}"
+            return f"文件不存在: {file_path}"
         with p.open("a", encoding="utf-8") as f:
             f.write("\n\n# ─── 参考解法 ───\n\n")
             f.write(content)
             f.write("\n")
-        console.print(f"[dim]参考解法已追加到 {fp}[/dim]")
-        return f"已追加到 {fp}"
+        console.print(f"[dim]参考解法已追加到 {file_path}[/dim]")
+        return f"已追加到 {file_path}"
 
 
     def _tool_search_problem(self, keyword: str) -> str:
@@ -736,98 +975,121 @@ class Agent:
             for p in results
         ]
         selected = _arrow_select(choices)
-        if selected:
-            result = start_problem(selected.id)
-            if not isinstance(result, str):
-                self._pending_clear = True
-                return f"已开始: {selected.id}. {selected.title}"
-            return result
-        return "未选题。"
+        if not selected:
+            return "用户未选择题目。"
+        return json.dumps({
+            "selected_id": selected.id,
+            "title": selected.title,
+            "difficulty": selected.difficulty,
+        }, ensure_ascii=False)
 
-    def _tool_pick_problem(self, tag: str | None = None, difficulty: str | None = None) -> str:
-        """Auto-pick a problem. If tag is given, pick by tag ignoring config."""
-        if tag:
-            return self._tool_pick_by_tag(tag, difficulty)
-        from lc.cli import handle_today
-        handle_today()
-        current = state.get_current()
-        if current:
-            self._pending_clear = True
-            pid, _ = current
-            problem = db.get_problem(pid)
-            if problem:
-                return f"已开始: {problem.id}. {problem.title}"
-        return "未选题。"
+    def _tool_pick_problem(self) -> str:
+        """Recommend problems based on user's /config settings."""
+        from lc.planner import generate_daily_plan
+        from lc.cli import get_config
+        plan = generate_daily_plan(
+            company=get_config("company"),
+            difficulty=get_config("difficulty"),
+            tag=get_config("tag"),
+            randomize=get_config("mode") == "random",
+        )
+        problems = plan.new_problems
 
-    def _tool_pick_by_tag(self, tag: str, difficulty: str | None = None) -> str:
-        """Pick a problem by tag, ignoring config, ordered by frequency."""
-        from lc.planner import _pick_from_codetop
-        problems = _pick_from_codetop(tag=tag, difficulty=difficulty, limit=5, randomize=False)
         if not problems:
-            return f"没有找到标签为「{tag}」的未做题目。"
+            return "没有找到合适的题目。"
 
         choices = [
             (f"#{p.id} {p.title} ({p.difficulty})", p)
-            for p in problems
+            for p in problems[:8]
         ]
         selected = _arrow_select(choices)
-        if selected:
-            start_problem(selected.id)
-            current = state.get_current()
-            if current:
-                self._pending_clear = True
-                problem = db.get_problem(selected.id)
-                if problem:
-                    return f"已开始: {problem.id}. {problem.title}"
-        return "未选题。"
+        if not selected:
+            return "用户未选择题目。"
+        return json.dumps({
+            "selected_id": selected.id,
+            "title": selected.title,
+            "difficulty": selected.difficulty,
+        }, ensure_ascii=False)
 
     def _tool_start_problem(self, problem_id: int) -> str:
         result = start_problem(problem_id)
         if isinstance(result, str):
             return result  # error message
-        self._pending_clear = True
-        problem, rel_path = result
+        problem, rel_path, memory_path = result
         return json.dumps(
             {
                 "status": "started",
+                "problem_id": problem.id,
                 "problem": f"{problem.id}. {problem.title}",
                 "difficulty": problem.difficulty,
                 "tags": problem.tags,
                 "file": str(rel_path),
+                "memory_file": str(memory_path.relative_to(Path.cwd())),
                 "description": problem.description or "",
             },
             ensure_ascii=False,
         )
 
-    def _tool_finish_problem(self) -> str:
-        from lc.cli import handle_submit
-        current = state.get_current()
-        if not current:
-            return "当前没有在做题。"
-        handle_submit()
-        return "已完成提交流程。"
+    def _tool_read_memory(self, problem_id: int | None = None) -> str:
+        if not problem_id:
+            return "请传入 problem_id。"
+        memory = db.get_memory(problem_id)
+        if not memory:
+            return f"第 {problem_id} 题没有记忆文件。"
+        memory_path = Path(memory["memory_file"])
+        if not memory_path.exists():
+            return f"记忆文件不存在: {memory['memory_file']}"
+        return memory_path.read_text(encoding="utf-8")
 
-    def _tool_abandon(self) -> str:
-        current = state.get_current()
-        if not current:
-            return "当前没有在做题。"
-        pid, _ = current
-        state.clear_current()
-        console.print(f"[dim]已放弃第 {pid} 题。输入 /today 选择下一道题。[/dim]")
-        return f"已放弃第 {pid} 题。"
+    def _tool_write_memory(self, problem_id: int | None = None,
+                            content: str = "", mode: str = "append") -> str:
+        if not problem_id:
+            return "请传入 problem_id。"
+        if not content:
+            return "请传入要写入的 content。"
+        memory = db.get_memory(problem_id)
+        if not memory:
+            return f"第 {problem_id} 题没有记忆文件。请先用 start_problem 开始做题。"
+        memory_path = Path(memory["memory_file"])
 
-    def _tool_count_hint(self) -> str:
-        current = state.get_current()
-        if not current:
-            return "当前没有在做题。"
-        _, aid = current
-        db.increment_hints(aid)
-        return "已记录提示。"
+        if mode == "overwrite":
+            memory_path.write_text(content, encoding="utf-8")
+        else:
+            with memory_path.open("a", encoding="utf-8") as f:
+                f.write("\n" + content + "\n")
+        return f"已写入记忆文件。"
 
-    def _tool_count_teach(self) -> str:
-        current = state.get_current()
-        if not current:
-            return "当前没有在做题。"
-        _, aid = current
-        db.increment_teach(aid)
-        return "已记录讲解。"
+    def _tool_get_daily_plan(self) -> str:
+        from lc.planner import generate_daily_plan
+        from lc.cli import get_config
+        plan = generate_daily_plan(
+            company=get_config("company"),
+            difficulty=get_config("difficulty"),
+            tag=get_config("tag"),
+            randomize=get_config("mode") == "random",
+        )
+        from lc.display import show_daily_plan
+        show_daily_plan(plan)
+        result = {
+            "new_problems": [
+                {"problem_id": p.id, "title": p.title, "difficulty": p.difficulty}
+                for p in plan.new_problems
+            ],
+        }
+        return json.dumps(result, ensure_ascii=False)
+
+    def _tool_get_hot_problems(self, company: str | None = None, tag: str | None = None) -> str:
+        from lc.codetop_api import fetch_hot_problems
+        from lc.cli import get_config
+        company = company or get_config("company") or None
+        tag = tag or get_config("tag") or None
+        problems, total = fetch_hot_problems(company=company, tag=tag, page=1, page_size=20)
+        practiced_ids = db.get_practiced_problem_ids()
+        from lc.display import show_hot_problems
+        show_hot_problems(problems, practiced_ids, company)
+        result = [
+            {"problem_id": p.leetcode_id, "title": p.title, "difficulty": p.difficulty,
+             "frequency": p.frequency, "practiced": p.leetcode_id in practiced_ids}
+            for p in problems
+        ]
+        return json.dumps({"hot_problems": result, "total": total}, ensure_ascii=False)

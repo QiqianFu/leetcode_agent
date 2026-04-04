@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.4.0 (2026-04-03)
+
+### Breaking Changes
+
+- **DB schema 简化** — 删除旧的 problems/attempts/reviews/tag_stats/schema_version 表，只保留 `problem_memories` 和 `session` 两张表。`init_db()` 自动 DROP 旧表
+- **删除旧模块** — 移除 `scheduler.py`、`state.py` 等不再使用的模块
+
+### Improvements
+
+- **AI 分类 fallback 闭合** — `_pick_category_heuristic()` 改用 `_TAG_TO_CATEGORY` 映射表，保证 fallback 路径也只返回 12 个 CATEGORIES 之一，不再泄漏原始 LeetCode tag 到文件夹名
+- **全局 console 单例** — theme 定义统一到 `display.py`，`agent.py` 和 `cli.py` 共用同一个 Console 实例
+- **LLM client 单例** — `_get_llm_client()` 模块级单例，Agent 和 `_classify_problem()` 共用，避免重复创建连接
+- **workspace 边界检查** — `read_solution` 和 `append_solution` 增加路径校验，防止读写工作区外文件
+- **start_problem 去重复输出** — 移除函数内的直接 console.print，由模型基于返回的 JSON 自行回复
+- **ReAct 循环上限提示** — 16 步达到上限时给用户可见提示，不再静默退出
+- **CLAUDE.md 同步** — 文档与代码对齐：修正 db.py 描述、删除不存在的函数引用、更新架构描述
+
+## v0.3.0 (2026-03-31)
+
+### Breaking Changes
+
+- **ReAct Agent 架构** — Agent 从固定流程的 tool calling 重构为 ReAct 循环（think → act → observe → repeat），模型自主推理决策，不再由 system prompt 硬编码"用户说X → 调Y"的规则
+- **工具与 UI 分离** — `search_problem` 和 `pick_problem` 不再内部执行 `start_problem`，而是返回用户选择结果，由 agent 自行决定下一步
+
+### New Features
+
+- **调试模式** — `DEBUG=1 leetcode` 启用，日志写入 `~/.leetcode_agent/agent.log`，记录模型调用耗时、token 用量（含 KV cache 命中）、工具执行耗时和结果、完整 messages dump
+
+### Improvements
+
+- **KV cache 优化** — system prompt 改为静态常量，历史消息 append-only，最大化 API 调用的 KV cache 命中率
+- **ReAct 循环上限提升至 16 步** — 支持更复杂的多步推理链
+
 ## v0.2.0 (2026-03-23)
 
 ### New Features

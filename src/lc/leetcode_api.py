@@ -159,28 +159,6 @@ def fetch_problem_by_slug(title_slug: str) -> Problem:
     return _parse_problem_detail(title_slug)
 
 
-def fetch_problems_by_tag(tag_slug: str, limit: int = 50) -> list[Problem]:
-    """Fetch problem list filtered by tag."""
-    data = _graphql(PROBLEM_LIST_QUERY, {
-        "categorySlug": "",
-        "limit": limit,
-        "skip": 0,
-        "filters": {"tags": [tag_slug]},
-    })
-    questions = data.get("problemsetQuestionList", {}).get("questions", [])
-    results = []
-    for q in questions:
-        results.append(Problem(
-            id=int(q["frontendQuestionId"]),
-            title=q["title"],
-            title_slug=q["titleSlug"],
-            difficulty=q["difficulty"],
-            ac_rate=q.get("acRate"),
-            tags=[t["name"] for t in q.get("topicTags", [])],
-        ))
-    return results
-
-
 def fetch_similar_problems(title_slug: str) -> list[dict]:
     """Fetch similar problems from the similarQuestions field."""
     data = _graphql(PROBLEM_DETAIL_QUERY, {"titleSlug": title_slug})

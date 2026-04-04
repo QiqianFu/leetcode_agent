@@ -164,15 +164,3 @@ def fetch_hot_problems(
     return problems, total
 
 
-def fetch_all_hot(
-    company: str | None = None,
-    max_pages: int = 10,
-) -> list[CodetopProblem]:
-    """Fetch multiple pages of hot problems, already sorted by frequency desc."""
-    all_problems = []
-    for page in range(1, max_pages + 1):
-        problems, total = fetch_hot_problems(company=company, page=page, page_size=20)
-        all_problems.extend(problems)
-        if len(all_problems) >= total or not problems:
-            break
-    return all_problems

@@ -2,19 +2,18 @@
 
 终端刷题助手 — 用自然语言和 AI 对话刷 LeetCode。
 
-AI 帮你选题、给提示、讲解思路、管理复习计划，你只需要专注写代码。
+AI 帮你选题、给提示、讲解思路、记录做题记忆，你只需要专注写代码。
 
 ![Demo](assets/demo.png)
 
 ## 功能
 
-- **自然语言交互** — 不用记指令，直接说"帮我做第 146 题"、"给个提示"、"我做完了"
+- **ReAct Agent** — AI 自主推理决策，多步思考后执行操作，不是简单的指令映射
+- **自然语言交互** — 不用记指令，直接说"帮我做第 146 题"、"给个提示"
 - **自动创建解题文件** — 按题目分类在当前目录创建 `.py` 文件，包含题目描述和代码模板
 - **智能提示** — AI 读取你的代码，给出针对性提示，引导你思考而不是直接给答案
-- **刷题计划** — 输入题目列表创建计划，支持中文题目名自动翻译匹配，按顺序逐题推进
-- **间隔复习** — 基于自评分数自动安排复习计划（1/3/7/14/30 天），可自定义每日复习题数
+- **记忆系统** — 每道题一个 markdown 记忆文件，记录做题过程、心得、难点
 - **高频题推荐** — 接入 CodeTop 数据，按目标公司筛选高频面试题
-- **刷题统计** — 跟踪做题数量、难度分布、薄弱标签
 - **输入历史** — 上下键恢复之前的输入，跨会话保留
 
 ## 安装
@@ -48,7 +47,7 @@ leetcode
   ⚙ start_problem
 已开始 1. Two Sum (Easy)
 解题文件: array/1_two_sum.py
-在编辑器中打开文件编写代码，写好后回来继续对话。
+记忆文件: .memories/1_two_sum.md
 
 > 给个提示
   ⚙ read_solution
@@ -59,33 +58,17 @@ leetcode
   ⚙ read_solution
 这道题最优解是用哈希表...
 
-> 我做完了，感觉还行
-你觉得这道题难度如何？请给个自评分：
-1=轻松搞定 2=稍有思考 3=想了一阵 4=很吃力 5=没做出来
-
-> 2
-  ⚙ submit_result
-已提交！用时 15 分钟，安排了 3 次复习。
-
 > 今天还有什么题
   ⚙ get_daily_plan
-今日计划：...
+推荐题目：...
 ```
 
 ### 快捷指令
 
 | 指令 | 说明 |
 |------|------|
-| `/today` | 今日计划（复习 + 新题） |
-| `/submit` | 提交当前题目 |
-| `/info` | 当前做题状态 |
-| `/similar` | 查找相似题目 |
-| `/plan` | 创建刷题计划（输入题目列表，自动翻译匹配） |
-| `/status` | 刷题统计 |
-| `/review` | 待复习列表 |
-| `/hot` | 高频面试题 |
-| `/undo` | 撤回上次提交 |
-| `/config` | 设置公司、难度、排序、标签、复习题数 |
+| `/config` | 设置公司、难度、排序、标签 |
+| `/clear` | 清屏 + 清除对话历史 |
 | `/help` | 显示帮助 |
 | `/quit` | 退出 |
 
@@ -93,59 +76,62 @@ leetcode
 
 ## 解题文件结构
 
-做题时会在当前目录按分类创建文件：
+做题时会在当前目录按 AI 分类创建文件（12 个固定分类：dp, greedy, binary_search, two_pointers, dfs_bfs, sorting, stack_queue, tree, graph, design, math_bit, string）：
 
 ```
 ./
-├── array/
-│   └── 1_two_sum.py
-├── hash_table/
-│   └── 146_lru_cache.py
-├── dynamic_programming/
+├── dp/
 │   └── 70_climbing_stairs.py
+├── two_pointers/
+│   └── 1_two_sum.py
+├── design/
+│   └── 146_lru_cache.py
+├── .memories/
+│   ├── 1_two_sum.md
+│   ├── 146_lru_cache.md
+│   └── 70_climbing_stairs.md
 └── ...
 ```
 
-每个文件包含题目描述（注释）和 LeetCode 官方的 Python3 代码模板。
+每个 `.py` 文件包含题目描述（注释）和 LeetCode 官方的 Python3 代码模板。每个 `.md` 记忆文件记录做题过程和心得。
 
-## 复习算法
+## 调试模式
 
-做完题自评 1-5 分，系统根据分数自动安排复习：
+```bash
+DEBUG=1 leetcode
+```
 
-| 情况 | 复习间隔 |
-|------|----------|
-| 自评 3-5 且用了提示 | 1, 3, 7, 14, 30 天 |
-| 自评 3-5 | 1, 7, 30 天 |
-| 自评 1-2 | 3, 14 天 |
-| 复习时评 4-5 | 额外 +1 天后复习 |
-| 复习时评 1-2 | 取消后续复习 |
+日志写入 `~/.leetcode_agent/agent.log`，记录模型调用耗时、token 用量、工具执行详情和完整对话链。实时查看：
+
+```bash
+tail -f ~/.leetcode_agent/agent.log
+```
 
 ## 数据存储
 
-所有数据存储在 `~/.leetcode_agent/leetcode.db`（SQLite），包括做题记录、复习计划、统计数据。
+- `~/.leetcode_agent/leetcode.db`（SQLite）— 记忆文件索引和配置
+- `.memories/`（当前工作区）— 每道题的 markdown 记忆文件
 
 ## 架构
 
 ```
 src/lc/
 ├── cli.py           — 命令入口 & REPL 主循环
-├── agent.py         — DeepSeek 对话 Agent（function calling）
-├── db.py            — SQLite schema + 数据访问
-├── models.py        — 数据模型（Problem / Attempt 等）
+├── agent.py         — ReAct Agent（DeepSeek + tool calling）
+├── db.py            — SQLite 数据访问（记忆索引 + 配置）
+├── models.py        — 数据模型（Problem）
 ├── config.py        — 环境变量 & 配置加载
 ├── leetcode_api.py  — LeetCode GraphQL 客户端
 ├── codetop_api.py   — CodeTop 高频题 API
-├── scheduler.py     — 间隔复习算法
 ├── planner.py       — 每日计划生成
-├── display.py       — Rich 渲染
-└── state.py         — 会话状态管理
+└── display.py       — Rich 渲染
 ```
 
 ## 技术栈
 
 - **CLI**: prompt_toolkit + Rich
-- **AI**: DeepSeek (OpenAI 兼容 API，支持 function calling)
-- **数据**: SQLite
+- **AI**: DeepSeek (OpenAI 兼容 API，ReAct agent + tool calling)
+- **数据**: SQLite + Markdown 记忆文件
 - **题目来源**: LeetCode GraphQL API + CodeTop API
 
 ## 贡献

@@ -15,6 +15,8 @@ for p in (_project_env, _data_env):
 DATA_DIR = Path.home() / ".leetcode_agent"
 DATA_DIR.mkdir(exist_ok=True)
 
+DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+
 DB_PATH = DATA_DIR / "leetcode.db"
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -25,3 +27,4 @@ LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql"
 
 MAX_NEW_PROBLEMS_PER_DAY = 3
 MAX_TOTAL_PROBLEMS_PER_DAY = 10
+MAX_AGENT_HISTORY_MESSAGES = int(os.getenv("MAX_AGENT_HISTORY_MESSAGES", "40"))
