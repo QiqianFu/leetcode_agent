@@ -7,8 +7,7 @@
 | 函数 | 文件 | 用途 | 预期 Tool |
 |------|------|------|-----------|
 | `show_problem(problem)` | `src/lc/display.py` | 渲染题目详情（Panel + Markdown） | 展示题目详情 |
-| `fetch_similar_problems(title_slug)` | `src/lc/leetcode_api.py` | 获取相似题目列表 | `get_similar` — 查看相似题 |
-| `fetch_problem_by_slug(title_slug)` | `src/lc/leetcode_api.py` | 按 slug 获取题目 | 内部辅助，配合 similar 使用 |
+| `fetch_problem_by_slug(title_slug)` | `src/lc/leetcode_api.py` | 按 slug 获取题目 | 内部辅助 |
 | `delete_session(key)` | `src/lc/db.py` | 删除 session KV | 通用基础设施，config 管理可能用到 |
 | `clear_session()` | `src/lc/db.py` | 清空所有 session KV | 重置配置等场景 |
 

@@ -18,6 +18,7 @@ DATA_DIR.mkdir(exist_ok=True)
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 
 DB_PATH = DATA_DIR / "leetcode.db"
+USER_MEMORY_PATH = DATA_DIR / "user_memory.md"
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"

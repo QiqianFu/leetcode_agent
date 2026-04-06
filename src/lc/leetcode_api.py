@@ -157,14 +157,3 @@ def fetch_problem(problem_id: int) -> Problem:
 def fetch_problem_by_slug(title_slug: str) -> Problem:
     """Fetch a problem by its title slug."""
     return _parse_problem_detail(title_slug)
-
-
-def fetch_similar_problems(title_slug: str) -> list[dict]:
-    """Fetch similar problems from the similarQuestions field."""
-    data = _graphql(PROBLEM_DETAIL_QUERY, {"titleSlug": title_slug})
-    q = data.get("question", {})
-    similar_raw = q.get("similarQuestions", "[]")
-    try:
-        return json.loads(similar_raw)
-    except (json.JSONDecodeError, TypeError):
-        return []

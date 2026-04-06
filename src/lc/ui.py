@@ -29,7 +29,7 @@ def agent_renderable(content: str):
     """Render agent response with ⏺ prefix, content indented."""
     t = Table(show_header=False, show_edge=False, box=None, padding=0, expand=True)
     t.add_column(width=2, no_wrap=True)
-    t.add_column()
+    t.add_column(overflow="fold")
     t.add_row(Text("⏺", style="blue"), Markdown(content))
     return t
 

@@ -74,6 +74,39 @@ leetcode
 
 除此之外，所有操作都通过自然语言完成，AI 会自动理解你的意图。
 
+## 记忆系统
+
+LeetCode Agent 有三层记忆，帮你积累刷题经验：
+
+### LeetCode.md — 你的自定义指令
+
+在工作区根目录创建 `LeetCode.md`，写入你的偏好和指令，Agent 每次对话都会读取并遵守。
+
+```bash
+touch LeetCode.md
+```
+
+示例内容：
+
+```markdown
+# 我的刷题偏好
+
+- 我用 Python，偏好迭代写法，不喜欢递归
+- 给提示时先给小提示，不要直接给答案
+- 每道题做完后帮我总结时间复杂度和空间复杂度
+- 我在准备 Google 面试，重点关注 Medium 难度
+```
+
+### 用户偏好记忆 — AI 自动维护
+
+Agent 会在对话过程中观察你的编码习惯、薄弱点、偏好等，自动记录到 `~/.leetcode_agent/user_memory.md`。这些信息跨会话持久保存，不会因 `/clear` 丢失。
+
+你也可以主动让 Agent 记住某些偏好："记住我喜欢用 defaultdict"。
+
+### 题目记忆 — 每题一个
+
+每道做过的题都有一个 `.memories/{id}_{title}.md` 记忆文件，记录做题过程、心得、难点、错误思路。做完题时 Agent 会自动写入总结。
+
 ## 解题文件结构
 
 做题时会在当前目录按 AI 分类创建文件（12 个固定分类：dp, greedy, binary_search, two_pointers, dfs_bfs, sorting, stack_queue, tree, graph, design, math_bit, string）：

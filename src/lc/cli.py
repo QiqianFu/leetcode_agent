@@ -151,6 +151,11 @@ HELP_TEXT = """
   [cyan]/clear[/cyan]   清屏 + 清除对话历史
   [cyan]/help[/cyan]    显示帮助
   [cyan]/quit[/cyan]    退出
+
+[bold]记忆系统:[/bold]
+  [dim]LeetCode.md[/dim]   在工作区根目录创建，写入你的自定义指令和偏好
+  [dim]用户偏好[/dim]      AI 自动记录你的编码习惯和薄弱点（~/.leetcode_agent/user_memory.md）
+  [dim]题目记忆[/dim]      每道题的 .memories/ 文件，记录做题心得和难点
 """.strip()
 
 

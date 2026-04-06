@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 from rich.live import Live
@@ -17,6 +18,7 @@ from lc.config import (
     DEEPSEEK_MODEL,
     HISTORY_WARNING_THRESHOLD,
     MAX_AGENT_HISTORY_MESSAGES,
+    USER_MEMORY_PATH,
 )
 from lc.display import console
 from lc.tools import TOOLS, execute_tool
@@ -50,13 +52,15 @@ SYSTEM_PROMPT = """\
 
 ## 角色
 - 帮用户选题、做题、复习
-- 给提示时先引导思考，用户明确要求讲解时才给完整思路
+- 用户刚开始做题时给提示引导思考，不要直接给完整思路；但用户主动求助或表示困难时，直接给出讲解
 - 用户意图明确时直接执行，不要反复确认
 
 ## 可用工具
 你可以自主决定何时、以什么顺序调用工具。每轮你可以思考、调用工具、观察结果，然后决定下一步。
 
 ## 工具协作
+- 用户指定了题型/关键词（如"来一道 DP 题""树的题""背包问题"）→ 用 search_problem（翻译成英文关键词搜索）
+- 用户没有具体要求、只是说"开始刷题""来一道题" → 用 pick_problem（从 CodeTop 高频题推荐）
 - pick_problem / search_problem 返回的是用户选中的题目信息（selected_id），你需要接着调 start_problem 来真正开始做题（创建本地文件等）
 - start_problem 返回 problem_id、file 路径和 memory_file 路径。后续如果忘了 file_path，可先调 find_problem_file 按 problem_id 找回
 - 用户提到某道已存在的题、或想继续之前的题时，先调 check_problem 获取题目状态；需要文件时再调 find_problem_file
@@ -66,9 +70,31 @@ SYSTEM_PROMPT = """\
 - 如果只记得题型/文件夹，可用 list_category_problems 查看当前工作区对应分类目录
 
 ## 记忆系统
-每道题都有一个对应的 markdown 记忆文件。你可以用 read_memory / write_memory 来读写题目的记忆。
-- 做题过程中的提示、讲解、心得、难点、错误思路等，都应该记录到记忆文件中
-- 用户说「提交」或做完题时，用 write_memory 把做题总结写入记忆文件
+
+你有三层记忆：
+
+### L1: LeetCode.md（用户指令）
+如果 system prompt 末尾附带了 LeetCode.md 的内容，那是用户手动编写的偏好和指令，你必须遵守。
+
+### L2: 用户偏好记忆（你来维护）
+存储跨会话的持久信息（编码风格、辅导偏好、薄弱点等）。如果 system prompt 中附带了用户偏好记忆，请参考。
+- 当用户明确表达偏好时（"我喜欢用迭代"、"别给太多提示"、"记住…"），调用 `update_user_memory` 工具
+- 你不需要自己编辑记忆内容，子 agent 会根据对话上下文自动处理合并和更新
+
+### L3: 题目记忆（每题一个）
+通过 read_memory 工具读取每道题的记忆文件。
+
+**开题时找相似题：**
+- start_problem 之后，立即调用 `find_similar_problems`，传入 problem_id
+- 如果返回了相似题的历史记忆，告诉用户"这道题和你之前做过的 X、Y 思路类似，可以从那个方向思考"
+- 同时根据相似题记忆分析用户表现变化，如有值得记录的发现调用 `update_user_memory`
+
+**做题中写记忆：**
+- 当你检查了用户答案、给出了实质性指导、或用户说做完了，调用 `analyze_and_memorize` 传入 problem_id
+- 不需要等题目彻底做完，每次有实质性分析都可以调用（子 agent 会根据对话上下文自动整合更新）
+- 不要用 write_memory 写做题总结，那是 analyze_and_memorize 的职责。write_memory 仅用于用户要求你手动记录特定笔记时
+
+**复习时：**
 - 用户问复习、回顾时，读取相关题目的记忆文件来判断
 
 ## 注意事项
@@ -128,8 +154,7 @@ class Agent:
         self.messages.append({"role": "user", "content": user_input})
         logger.debug("user: %s", user_input)
 
-        # Static system prompt → KV cache prefix stays stable across calls
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.messages
+        messages = [{"role": "system", "content": self._build_system_prompt()}] + self.messages
 
         # ReAct loop: think → act → observe → repeat until no more tool calls
         for step in range(30):  # safety limit
@@ -167,11 +192,16 @@ class Agent:
             messages.append(assistant_msg)
             self.messages.append(assistant_msg)
 
-            # Execute tools — parallel when all are non-interactive
+            # Execute tools — parallel when all are non-interactive and non-dependent
             _INTERACTIVE_TOOLS = {"pick_problem", "search_problem"}
+            _SERIAL_TOOLS = {
+                "start_problem", "find_similar_problems",
+                "update_user_memory", "analyze_and_memorize", "write_memory",
+            }
+            _FORCE_SERIAL = _INTERACTIVE_TOOLS | _SERIAL_TOOLS
             can_parallel = (
                 len(tool_calls) > 1
-                and not any(tc["name"] in _INTERACTIVE_TOOLS for tc in tool_calls)
+                and not any(tc["name"] in _FORCE_SERIAL for tc in tool_calls)
             )
 
             if can_parallel:
@@ -180,7 +210,8 @@ class Agent:
                 t0 = time.time()
                 with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
                     futures = {
-                        pool.submit(execute_tool, tc["name"], tc["arguments"], self.client): tc
+                        pool.submit(execute_tool, tc["name"], tc["arguments"],
+                                    self.client, messages): tc
                         for tc in tool_calls
                     }
                     results_map: dict[str, str] = {}
@@ -200,7 +231,8 @@ class Agent:
                 for tc in tool_calls:
                     console.print(f"[dim]  ⚙ {tc['name']}[/dim]")
                     t0 = time.time()
-                    result = execute_tool(tc["name"], tc["arguments"], self.client)
+                    result = execute_tool(tc["name"], tc["arguments"],
+                                         self.client, messages)
                     elapsed = time.time() - t0
                     logger.debug("tool %s(%s) → %.1fs | result: %s",
                                  tc["name"], tc["arguments"],
@@ -214,6 +246,32 @@ class Agent:
 
         logger.warning("ReAct loop hit 30-step limit")
         console.print("[yellow]（已达到单轮推理上限，请继续对话）[/yellow]")
+
+    @staticmethod
+    def _build_system_prompt() -> str:
+        """Build system prompt with L1 (LeetCode.md) and L2 (user_memory) context."""
+        parts = [SYSTEM_PROMPT]
+
+        # L1: LeetCode.md (workspace-local user instructions)
+        leetcode_md = Path.cwd() / "LeetCode.md"
+        if leetcode_md.exists():
+            try:
+                content = leetcode_md.read_text(encoding="utf-8").strip()
+                if content:
+                    parts.append(f"\n\n## 用户自定义指令 (LeetCode.md)\n以下是用户的自定义指令，你必须遵守：\n\n{content}")
+            except Exception:
+                pass
+
+        # L2: User preference memory (global)
+        if USER_MEMORY_PATH.exists():
+            try:
+                user_mem = USER_MEMORY_PATH.read_text(encoding="utf-8").strip()
+                if user_mem:
+                    parts.append(f"\n\n## 用户偏好记忆\n以下是你之前记录的用户偏好，请参考：\n\n{user_mem}")
+            except Exception:
+                pass
+
+        return "".join(parts)
 
     def _summarize_session_context(self) -> bool:
         """Check if there are memory files referenced in this session.
