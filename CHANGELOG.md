@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.0 (2026-04-09)
+
+### New Features
+
+- **双语 README + 架构图** — 重写 README，英文/中文双语，Mermaid agent loop 和 memory system 架构图，`demo.tape` VHS 录制脚本供生成演示 GIF
+- **Unit tests** — 36 个单元测试，覆盖工具 dispatcher（registry 完整性、JSON 错误处理、异常捕获）、L3 记忆读写（append/overwrite/边界）、AI 分类（`pick_category_heuristic` 所有路径）；`pytest tests/` 一键运行
+
+### Improvements
+
+- **tools.py 拆分** — 869 行的 `tools.py` 重构为三层：`tool_defs.py`（17 个工具 JSON schema）、`tool_impl/`（按功能分组：workspace / problems / memory / subagents）、`tools.py`（薄层 dispatcher，99 行）；`agent.py` 的 `from lc.tools import TOOLS, execute_tool` 接口不变
+- **pyproject.toml** — 新增 `[project.optional-dependencies] dev`（pytest、mypy）、`[tool.pytest.ini_options]`（pythonpath 配置）、`[tool.mypy]`（practical 严格度：`warn_return_any`、`check_untyped_defs`、`ignore_missing_imports`）
+- **display.py 循环依赖修复** — `CodetopProblem` 改用 `TYPE_CHECKING` guard 导入，消除循环依赖风险
+
 ## v0.4.0 (2026-04-03)
 
 ### Breaking Changes

@@ -1,178 +1,265 @@
 # LeetCode Agent
 
-终端刷题助手 — 用自然语言和 AI 对话刷 LeetCode。
+> Terminal-based LeetCode study assistant — chat with AI to pick problems, get hints, and build a personal memory of your progress.
 
-AI 帮你选题、给提示、讲解思路、记录做题记忆，你只需要专注写代码。
+**[中文](#中文)** · **[English](#english)**
+
+---
+
+## English
+
+### Demo
+
+> **Recording a GIF demo**: run `vhs demo.tape` (requires [VHS](https://github.com/charmbracelet/vhs)) or record your terminal with [asciinema](https://asciinema.org/).
 
 ![Demo](assets/demo.png)
 
-## 功能
+*Full flow: pick a problem → get AI hints → review solution → memory auto-saved → find similar problems from history.*
 
-- **ReAct Agent** — AI 自主推理决策，多步思考后执行操作，不是简单的指令映射
-- **自然语言交互** — 不用记指令，直接说"帮我做第 146 题"、"给个提示"
-- **自动创建解题文件** — 按题目分类在当前目录创建 `.py` 文件，包含题目描述和代码模板
-- **智能提示** — AI 读取你的代码，给出针对性提示，引导你思考而不是直接给答案
-- **记忆系统** — 每道题一个 markdown 记忆文件，记录做题过程、心得、难点
-- **高频题推荐** — 接入 CodeTop 数据，按目标公司筛选高频面试题
-- **输入历史** — 上下键恢复之前的输入，跨会话保留
+---
 
-## 安装
+### What It Does
 
-需要 Python 3.11+。
+A single REPL loop where you talk to an AI tutor in natural language. No memorizing commands — just say what you want:
+
+```
+> do problem 146
+> give me a hint
+> I'm stuck on the edge case
+> show me the answer
+> what similar problems have I done?
+```
+
+The agent reasons step-by-step (ReAct architecture), reads your code, checks your history, and gives contextual guidance.
+
+---
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **ReAct Agent** | Multi-step reasoning + tool use — not a command router |
+| **Natural language** | No commands to memorize; the agent figures out intent |
+| **Auto solution files** | Creates `category/id_title.py` with problem statement + template |
+| **Smart hints** | Reads your actual code and gives targeted nudges |
+| **3-layer memory** | Per-session, per-user, and per-problem memory that persists across sessions |
+| **Company filter** | CodeTop integration — filter high-frequency problems by target company |
+| **Input history** | ↑/↓ history across sessions |
+| **Web search** | Agent can search the web for algorithm explanations |
+
+---
+
+### Architecture
+
+#### Agent Loop
+
+```mermaid
+flowchart TD
+    U[User Input] --> CLI["CLI REPL\n(cli.py)"]
+    CLI --> A["Agent.chat()\n(agent.py)"]
+    A --> SP["Build System Prompt\nL1: LeetCode.md\nL2: user_memory.md"]
+    SP --> LLM["DeepSeek LLM\nstreaming + tool_calling"]
+    LLM -->|tool_calls| EX["execute_tool()\n(tools.py)"]
+    EX --> WT["Workspace Tools\nfile ops, code read/write"]
+    EX --> PT["Problem Tools\nLeetCode API, CodeTop"]
+    EX --> MT["Memory Tools\n.memories/ read/write"]
+    EX --> SA["Sub-Agents\nmemorize, find-similar, update-user-memory"]
+    WT & PT & MT & SA -->|result| LLM
+    LLM -->|no tool_calls| R["Final Response → User"]
+```
+
+#### Memory System
+
+```mermaid
+flowchart LR
+    subgraph Inputs["Injected into System Prompt"]
+        L1["L1: LeetCode.md\nManual user instructions\n(workspace root)"]
+        L2["L2: user_memory.md\nAuto-maintained preferences\n(~/.leetcode_agent/)"]
+    end
+    subgraph PerProblem["Per-Problem (tool access)"]
+        L3["L3: .memories/id_title.md\nAuto-generated summaries\n(workspace .memories/)"]
+    end
+    Inputs --> LLM[LLM]
+    LLM <-->|read_memory / write_memory\nanalyze_and_memorize| L3
+    LLM -->|update_user_memory| L2
+```
+
+#### Codebase Layout
+
+```
+src/lc/
+├── cli.py            — REPL entry point, slash commands, /config
+├── agent.py          — ReAct loop (think → act → observe), streaming LLM calls
+├── tool_defs.py      — Tool JSON schemas (passed to LLM)
+├── tools.py          — Dispatcher (execute_tool) + imports
+├── tool_impl/
+│   ├── workspace.py  — File ops: read_solution, find_problem_file, append_solution, …
+│   ├── problems.py   — Problem selection: search_problem, pick_problem, start_problem, …
+│   ├── memory.py     — Memory: read_memory, write_memory
+│   └── subagents.py  — Sub-agents: web_search, update_user_memory, find_similar, memorize
+├── workspace.py      — File creation, AI classification, start_problem
+├── db.py             — SQLite DAL (problem_memories + session KV)
+├── models.py         — Problem dataclass + CATEGORIES
+├── config.py         — Env vars, paths
+├── leetcode_api.py   — LeetCode GraphQL client
+├── codetop_api.py    — CodeTop high-frequency problems API
+├── planner.py        — Daily plan generation
+├── display.py        — Rich rendering
+└── ui.py             — Arrow selector, terminal helpers
+```
+
+---
+
+### Install
+
+Requires Python 3.11+.
 
 ```bash
-git clone https://github.com/你的用户名/leetcode-agent.git
+git clone https://github.com/QiqianFu/leetcode-agent.git
 cd leetcode-agent
 pip install -e .
 ```
 
-## 配置
-
-创建 `.env` 文件，填入 DeepSeek API Key（[申请地址](https://platform.deepseek.com/)）：
+Get a DeepSeek API key at [platform.deepseek.com](https://platform.deepseek.com/), then:
 
 ```bash
-echo "DEEPSEEK_API_KEY=你的key" > .env
+echo "DEEPSEEK_API_KEY=your_key_here" > .env
 ```
 
-## 使用
+### Run
 
 ```bash
 leetcode
 ```
 
-启动后直接用自然语言对话：
+### Slash Commands
 
-```
-> 帮我做第 1 题
-  ⚙ start_problem
-已开始 1. Two Sum (Easy)
-解题文件: array/1_two_sum.py
-记忆文件: .memories/1_two_sum.md
+| Command | Description |
+|---------|-------------|
+| `/config` | Set company, difficulty, sort order, tag |
+| `/clear` | Clear screen + conversation history |
+| `/help` | Show help |
+| `/quit` | Exit |
 
-> 给个提示
-  ⚙ read_solution
-你现在用的是暴力双循环，想想有没有办法只遍历一次？
-提示：用一个数据结构来记录"你见过的数"。
+Everything else is natural language.
 
-> 讲解一下
-  ⚙ read_solution
-这道题最优解是用哈希表...
+---
 
-> 今天还有什么题
-  ⚙ get_daily_plan
-推荐题目：...
-```
+### Memory System
 
-### 快捷指令
+**L1 — `LeetCode.md` (manual)**
 
-| 指令 | 说明 |
-|------|------|
-| `/config` | 设置公司、难度、排序、标签 |
-| `/clear` | 清屏 + 清除对话历史 |
-| `/help` | 显示帮助 |
-| `/quit` | 退出 |
-
-除此之外，所有操作都通过自然语言完成，AI 会自动理解你的意图。
-
-## 记忆系统
-
-LeetCode Agent 有三层记忆，帮你积累刷题经验：
-
-### LeetCode.md — 你的自定义指令
-
-在工作区根目录创建 `LeetCode.md`，写入你的偏好和指令，Agent 每次对话都会读取并遵守。
-
-```bash
-touch LeetCode.md
-```
-
-示例内容：
+Create `LeetCode.md` in your working directory. The agent reads it on every turn and follows your instructions.
 
 ```markdown
-# 我的刷题偏好
+# My preferences
 
-- 我用 Python，偏好迭代写法，不喜欢递归
-- 给提示时先给小提示，不要直接给答案
-- 每道题做完后帮我总结时间复杂度和空间复杂度
-- 我在准备 Google 面试，重点关注 Medium 难度
+- Python only, prefer iterative over recursive
+- Give small hints first, not full solutions
+- Summarize time/space complexity after each problem
+- Preparing for Google — focus on Medium
 ```
 
-### 用户偏好记忆 — AI 自动维护
+**L2 — `~/.leetcode_agent/user_memory.md` (auto)**
 
-Agent 会在对话过程中观察你的编码习惯、薄弱点、偏好等，自动记录到 `~/.leetcode_agent/user_memory.md`。这些信息跨会话持久保存，不会因 `/clear` 丢失。
+The agent observes your coding style and preferences across conversations and updates this file automatically. Persists through `/clear`.
 
-你也可以主动让 Agent 记住某些偏好："记住我喜欢用 defaultdict"。
+**L3 — `.memories/{id}_{title}.md` (auto, per-problem)**
 
-### 题目记忆 — 每题一个
+After each problem session, the agent writes a summary: approach, pitfalls, key insights, complexity. Used by `find_similar_problems` to connect new problems to your history.
 
-每道做过的题都有一个 `.memories/{id}_{title}.md` 记忆文件，记录做题过程、心得、难点、错误思路。做完题时 Agent 会自动写入总结。
+---
 
-## 解题文件结构
-
-做题时会在当前目录按 AI 分类创建文件（12 个固定分类：dp, greedy, binary_search, two_pointers, dfs_bfs, sorting, stack_queue, tree, graph, design, math_bit, string）：
-
-```
-./
-├── dp/
-│   └── 70_climbing_stairs.py
-├── two_pointers/
-│   └── 1_two_sum.py
-├── design/
-│   └── 146_lru_cache.py
-├── .memories/
-│   ├── 1_two_sum.md
-│   ├── 146_lru_cache.md
-│   └── 70_climbing_stairs.md
-└── ...
-```
-
-每个 `.py` 文件包含题目描述（注释）和 LeetCode 官方的 Python3 代码模板。每个 `.md` 记忆文件记录做题过程和心得。
-
-## 调试模式
+### Debug Mode
 
 ```bash
 DEBUG=1 leetcode
 ```
 
-日志写入 `~/.leetcode_agent/agent.log`，记录模型调用耗时、token 用量、工具执行详情和完整对话链。实时查看：
+Logs to `~/.leetcode_agent/agent.log`: LLM latency, token usage (with cache hit rate), tool execution times, full message dumps.
 
 ```bash
 tail -f ~/.leetcode_agent/agent.log
 ```
 
-## 数据存储
+---
 
-- `~/.leetcode_agent/leetcode.db`（SQLite）— 记忆文件索引和配置
-- `.memories/`（当前工作区）— 每道题的 markdown 记忆文件
+### Development
 
-## 架构
-
-```
-src/lc/
-├── cli.py           — 命令入口 & REPL 主循环
-├── agent.py         — ReAct Agent 核心（chat loop, streaming, LLM client）
-├── tools.py         — 13 个工具定义 + 实现 + dispatcher
-├── workspace.py     — 文件/分类 helpers（解题文件创建, AI 分类, start_problem）
-├── ui.py            — 终端交互（箭头选择器, 渲染 helpers）
-├── db.py            — SQLite 数据访问（记忆索引 + 配置）
-├── models.py        — 数据模型（Problem）
-├── config.py        — 环境变量 & 配置加载
-├── leetcode_api.py  — LeetCode GraphQL 客户端
-├── codetop_api.py   — CodeTop 高频题 API
-├── planner.py       — 每日计划生成
-└── display.py       — Rich 渲染
+```bash
+pip install -e ".[dev]"
+pytest
+mypy src/
 ```
 
-## 技术栈
+---
 
-- **CLI**: prompt_toolkit + Rich
-- **AI**: DeepSeek (OpenAI 兼容 API，ReAct agent + tool calling)
-- **数据**: SQLite + Markdown 记忆文件
-- **题目来源**: LeetCode GraphQL API + CodeTop API
+## 中文
 
-## 贡献
+### 功能介绍
 
-欢迎提 Issue 和 Pull Request！无论是 bug 反馈、功能建议还是代码改进，都非常欢迎。
+终端刷题助手 — 用自然语言和 AI 对话刷 LeetCode。AI 帮你选题、给提示、讲解思路、记录做题记忆，你只需要专注写代码。
+
+```
+> 帮我做第 146 题
+> 给个提示
+> 我卡在边界条件了
+> 展示答案
+> 我做过哪些类似的题？
+```
+
+### 特性
+
+- **ReAct Agent** — 多步推理 + 工具调用，而不是简单的指令映射
+- **自然语言** — 不用记命令，AI 自动理解意图
+- **自动创建解题文件** — 按分类在当前目录创建含题目描述和模板的 `.py` 文件
+- **智能提示** — 读取你的实际代码，给出针对性引导
+- **三层记忆系统** — 会话、用户偏好、每题记忆，跨会话持久保存
+- **高频题推荐** — 接入 CodeTop，按目标公司筛选
+- **网络搜索** — Agent 可联网查找算法讲解
+
+### 安装
+
+```bash
+git clone https://github.com/QiqianFu/leetcode-agent.git
+cd leetcode-agent
+pip install -e .
+echo "DEEPSEEK_API_KEY=你的key" > .env
+leetcode
+```
+
+API Key 申请地址：[platform.deepseek.com](https://platform.deepseek.com/)
+
+### 记忆系统
+
+| 层级 | 文件 | 维护方式 |
+|------|------|----------|
+| L1 | `./LeetCode.md` | 用户手动编写 |
+| L2 | `~/.leetcode_agent/user_memory.md` | Agent 自动维护（编码偏好、薄弱点等） |
+| L3 | `./.memories/{id}_{title}.md` | Agent 自动生成（每题做题总结） |
+
+### 快捷命令
+
+| 命令 | 说明 |
+|------|------|
+| `/config` | 设置公司、难度、排序、标签 |
+| `/clear` | 清屏 + 清除对话历史 |
+| `/help` | 帮助 |
+| `/quit` | 退出 |
+
+### 调试
+
+```bash
+DEBUG=1 leetcode
+tail -f ~/.leetcode_agent/agent.log
+```
+
+### 数据存储
+
+- `~/.leetcode_agent/leetcode.db` — SQLite，记忆索引 + 配置
+- `.memories/` — 当前工作区的 Markdown 记忆文件
+
+---
 
 ## License
 
