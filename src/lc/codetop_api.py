@@ -112,6 +112,48 @@ _TAG_EN_TO_ZH = {
 }
 
 
+_EN_TAG_SYNONYMS: dict[str, tuple[str, ...]] = {}
+
+
+def _build_en_synonyms() -> None:
+    """Group English aliases in _TAG_EN_TO_ZH by their Chinese target.
+
+    Result: each English form maps to all other English forms sharing the same
+    underlying concept (e.g. 'dp' → ('dp', 'dynamic programming'))."""
+    groups: dict[str, list[str]] = {}
+    for en, zh in _TAG_EN_TO_ZH.items():
+        groups.setdefault(zh, []).append(en)
+    for en in _TAG_EN_TO_ZH:
+        _EN_TAG_SYNONYMS[en] = tuple(groups[_TAG_EN_TO_ZH[en]])
+
+
+_build_en_synonyms()
+
+
+def expand_tag_synonyms(tag: str) -> list[str]:
+    """Return all known English synonyms for a tag query.
+
+    Used by local DB filtering where tags are stored as LeetCode official
+    English names but model may pass shortcuts or Chinese. Examples:
+        'dp' → ['dp', 'dynamic programming']
+        'Dp' → ['dp', 'dynamic programming']   (case-insensitive)
+        '动态规划' → ['dp', 'dynamic programming']   (Chinese reverse)
+        '' / '  ' → []   (empty input → caller should skip filter)
+        'unknown' → ['unknown']   (pass-through)
+    """
+    t = (tag or "").strip()
+    if not t:
+        return []
+    t_lower = t.lower()
+    if t_lower in _EN_TAG_SYNONYMS:
+        return list(_EN_TAG_SYNONYMS[t_lower])
+    # Chinese reverse lookup: find any English key that maps to this Chinese value
+    for en, zh in _TAG_EN_TO_ZH.items():
+        if zh == t:
+            return list(_EN_TAG_SYNONYMS[en])
+    return [t_lower]
+
+
 def _find_tag_id(tag_name: str) -> int | None:
     """Find CodeTop tag ID by name (exact then fuzzy, supports English input)."""
     tags = fetch_tags()

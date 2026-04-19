@@ -21,12 +21,10 @@ DB_PATH = DATA_DIR / "leetcode.db"
 USER_MEMORY_PATH = DATA_DIR / "user_memory.md"
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql"
 
-MAX_NEW_PROBLEMS_PER_DAY = 5
-MAX_TOTAL_PROBLEMS_PER_DAY = 10
 MAX_AGENT_HISTORY_MESSAGES = int(os.getenv("MAX_AGENT_HISTORY_MESSAGES", "200"))
 HISTORY_WARNING_THRESHOLD = 0.8  # warn user when history reaches 80% of limit

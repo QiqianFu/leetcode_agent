@@ -2,32 +2,9 @@ from __future__ import annotations
 
 import random
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 
 from lc import db
-from lc.config import MAX_NEW_PROBLEMS_PER_DAY, MAX_TOTAL_PROBLEMS_PER_DAY
 from lc.models import Problem
-
-
-@dataclass
-class DailyPlan:
-    new_problems: list[Problem] = field(default_factory=list)
-
-
-def generate_daily_plan(
-    company: str | None = None,
-    difficulty: str | None = None,
-    tag: str | None = None,
-    randomize: bool = False,
-) -> DailyPlan:
-    """Generate today's practice plan from CodeTop."""
-    plan = DailyPlan()
-    new_limit = min(MAX_TOTAL_PROBLEMS_PER_DAY, MAX_NEW_PROBLEMS_PER_DAY)
-    plan.new_problems = _pick_from_codetop(
-        company=company, difficulty=difficulty, tag=tag,
-        limit=new_limit, randomize=randomize,
-    )
-    return plan
 
 
 def _pick_from_codetop(
@@ -52,6 +29,9 @@ def _pick_from_codetop(
     batch_size = 3  # fetch multiple pages in parallel
 
     target = limit * 5 if randomize else limit
+
+    # Normalize difficulty: "easy" / "EASY" / "Easy" → "Easy" (matches CodeTop's form)
+    difficulty_norm = (difficulty or "").strip().title() or None
 
     # Only pass tag to CodeTop if it can resolve it server-side
     server_tag = tag if (tag and _find_tag_id(tag) is not None) else None
@@ -87,7 +67,7 @@ def _pick_from_codetop(
                     continue
                 if cp.leetcode_id in seen_ids:
                     continue
-                if difficulty and cp.difficulty != difficulty:
+                if difficulty_norm and (cp.difficulty or "").title() != difficulty_norm:
                     continue
                 seen_ids.add(cp.leetcode_id)
                 candidates.append(Problem(

@@ -52,55 +52,48 @@ SYSTEM_PROMPT = """\
 
 ## 角色
 - 帮用户选题、做题、复习
-- 用户刚开始做题时给提示引导思考，不要直接给完整思路；但用户主动求助或表示困难时，直接给出讲解
-- 用户意图明确时直接执行，不要反复确认
+- 指导风格：用户刚开始做题时给提示引导思考；用户主动求助或明确表示困难时直接讲解
+- 用户意图明确时直接执行，不反复确认
 
-## 可用工具
-你可以自主决定何时、以什么顺序调用工具。每轮你可以思考、调用工具、观察结果，然后决定下一步。
+## 工具能力（你自主推理何时、如何组合）
+以下只说明每个工具"做什么"，不规定调用时机和顺序。请结合对话上下文和 L1/L2 记忆自行判断。
 
-## 工具协作
-- 用户指定了题型/关键词（如"来一道 DP 题""树的题""背包问题"）→ 用 search_problem（翻译成英文关键词搜索）
-- 用户没有具体要求、只是说"开始刷题""来一道题" → 用 pick_problem（从 CodeTop 高频题推荐）
-- pick_problem / search_problem 返回的是用户选中的题目信息（selected_id），你需要接着调 start_problem 来真正开始做题（创建本地文件等）
-- start_problem 返回 problem_id、file 路径和 memory_file 路径。后续如果忘了 file_path，可先调 find_problem_file 按 problem_id 找回
-- 用户提到某道已存在的题、或想继续之前的题时，先调 check_problem 获取题目状态；需要文件时再调 find_problem_file
-- read_solution / append_solution 需要 file_path 参数
-- 如果只记得题号，可用 find_problem_file 找回本地文件
-- 如果只记得题目名关键词，可用 search_workspace_files 搜当前工作区里的题目文件
-- 如果只记得题型/文件夹，可用 list_category_problems 查看当前工作区对应分类目录
+**题库查询（只读，不弹 UI）**
+- `search_leetcode(keyword, limit)` — 英文关键词搜 LeetCode 全站，返回候选列表
+- `list_hot_problems(tag, difficulty, company, limit, randomize)` — CodeTop 高频题列表，自动过滤用户已做。未传参数会 fallback 到 /config，返回 `used_filters` 告知实际应用的筛选
+
+**用户交互**
+- `let_user_pick(choices, prompt)` — 把候选列表展示给用户，箭头选择器返回 `selected_id`
+
+**开题与代码**
+- `start_problem(id)` — 重型复合动作：拉题 + AI 分类 + 建 solution 文件 + 建 memory 文件 + 注册 DB
+- `check_problem(id)` — 查题目元信息和是否做过（不返回 description）
+- `find_problem_file(id)` — 按题号找本地解题文件路径
+- `read_solution(file_path | problem_id)` — 读本地解题代码
+- `append_solution(file_path, content)` — 追加参考解法到解题文件末尾
+
+**记忆操作**
+- `read_memory(id)` — 读 L3 题目记忆文件
+- `write_memory(id, content, mode)` — 手动写 L3 记忆（你提供具体 content）
+- `analyze_and_memorize(id)` — 触发子 agent 从对话上下文生成 L3 做题总结（内容由子 agent 决定）
+- `update_user_memory()` — 触发子 agent 从对话上下文合并更新 L2 用户偏好（零参数）
+- `find_similar_problems(id)` — 子 agent 从用户已做题中挑算法相似的题，返回它们的 L3 记忆
+
+**外部**
+- `web_search(query, max_results)` — 联网搜索
 
 ## 记忆系统
+- **L1**: 工作区 `LeetCode.md`（用户手写指令，若存在会自动附在本 prompt 末尾）
+- **L2**: `~/.leetcode_agent/user_memory.md`（跨会话用户偏好：编码风格、辅导偏好、薄弱点、已掌握模式；若存在会自动附在本 prompt 末尾）
+- **L3**: 每题一份 `.memories/id_title.md`（通过 `read_memory` 按需读取）
 
-你有三层记忆：
+L2 是个性化推荐和辅导的关键输入——出题时参考薄弱点/擅长点，讲解时参考偏好风格。
 
-### L1: LeetCode.md（用户指令）
-如果 system prompt 末尾附带了 LeetCode.md 的内容，那是用户手动编写的偏好和指令，你必须遵守。
-
-### L2: 用户偏好记忆（你来维护）
-存储跨会话的持久信息（编码风格、辅导偏好、薄弱点等）。如果 system prompt 中附带了用户偏好记忆，请参考。
-- 当用户明确表达偏好时（"我喜欢用迭代"、"别给太多提示"、"记住…"），调用 `update_user_memory` 工具
-- 你不需要自己编辑记忆内容，子 agent 会根据对话上下文自动处理合并和更新
-
-### L3: 题目记忆（每题一个）
-通过 read_memory 工具读取每道题的记忆文件。
-
-**开题时找相似题：**
-- start_problem 之后，立即调用 `find_similar_problems`，传入 problem_id
-- 如果返回了相似题的历史记忆，告诉用户"这道题和你之前做过的 X、Y 思路类似，可以从那个方向思考"
-- 同时根据相似题记忆分析用户表现变化，如有值得记录的发现调用 `update_user_memory`
-
-**做题中写记忆：**
-- 当你检查了用户答案、给出了实质性指导、或用户说做完了，调用 `analyze_and_memorize` 传入 problem_id
-- 不需要等题目彻底做完，每次有实质性分析都可以调用（子 agent 会根据对话上下文自动整合更新）
-- 不要用 write_memory 写做题总结，那是 analyze_and_memorize 的职责。write_memory 仅用于用户要求你手动记录特定笔记时
-
-**复习时：**
-- 用户问复习、回顾时，读取相关题目的记忆文件来判断
-
-## 注意事项
-- search_problem 只支持英文关键词，需要时自行翻译
-- 本地文件搜索范围严格限制在当前工作区（当前 CLI 启动目录）内
-- 用户想看今日计划、高频题时，直接调用对应工具（get_daily_plan, get_hot_problems）"""
+## 硬约束
+- `search_leetcode` 只接受英文关键词，必要时自行翻译
+- 所有本地文件搜索严格限制在当前工作区（CLI 启动目录）内
+- `write_memory` 和 `analyze_and_memorize` 职责不同：前者你主动写具体内容，后者启动子 agent 根据对话上下文自动生成。不要混用
+"""
 
 # ─── LLM client singleton ───
 
@@ -151,6 +144,11 @@ class Agent:
                 f"剩余约 {remaining} 条。建议适时 /clear 开启新会话。[/yellow]\n"
             )
 
+        # Snapshot pre-turn message count for rollback on mid-loop API failure.
+        # Prevents leaving orphaned assistant.tool_calls without matching tool responses,
+        # which would cause DeepSeek to reject the next request with 400.
+        pre_turn_count = len(self.messages)
+
         self.messages.append({"role": "user", "content": user_input})
         logger.debug("user: %s", user_input)
 
@@ -163,8 +161,8 @@ class Agent:
             except self._RETRYABLE_ERRORS as e:
                 console.print(f"[red]API 调用失败: {e}[/red]")
                 console.print("[yellow]请稍后重试，或使用 /clear 开启新会话。[/yellow]")
-                # Remove the user message we just appended so user can retry
-                self.messages.pop()
+                # Roll back entire turn — drop user msg + any partial assistant/tool msgs
+                del self.messages[pre_turn_count:]
                 return
             logger.debug("step %d | tokens: %s | tools: %s | response: %s",
                          step, usage,
@@ -193,10 +191,15 @@ class Agent:
             self.messages.append(assistant_msg)
 
             # Execute tools — parallel when all are non-interactive and non-dependent
-            _INTERACTIVE_TOOLS = {"pick_problem", "search_problem"}
+            _INTERACTIVE_TOOLS = {"let_user_pick"}
+            # Tools with shared mutable state (DB rows, global L2 file) or expensive
+            # sub-agent LLM calls stay serial. write_memory is per-problem file I/O,
+            # no shared state → safe to parallelize.
             _SERIAL_TOOLS = {
-                "start_problem", "find_similar_problems",
-                "update_user_memory", "analyze_and_memorize", "write_memory",
+                "start_problem",
+                "find_similar_problems",
+                "update_user_memory",
+                "analyze_and_memorize",
             }
             _FORCE_SERIAL = _INTERACTIVE_TOOLS | _SERIAL_TOOLS
             can_parallel = (

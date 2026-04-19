@@ -17,10 +17,15 @@ def flush_stdin():
         except Exception:
             pass
     else:
+        # Only flush when stdin is a real TTY. On EOF stdin (pipes/non-interactive),
+        # select() reports readable but read(1) returns "" → infinite loop.
+        if not sys.stdin.isatty():
+            return
         import select
         try:
             while select.select([sys.stdin], [], [], 0)[0]:
-                sys.stdin.read(1)
+                if sys.stdin.read(1) == "":
+                    break
         except Exception:
             pass
 

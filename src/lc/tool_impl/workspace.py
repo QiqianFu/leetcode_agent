@@ -5,42 +5,97 @@ import json
 from pathlib import Path
 
 from lc import db
-from lc.display import console
+from lc.display import console, show_problem
 from lc.workspace import (
-    problem_files_in_workspace,
     relative_workspace_path,
-    slugify,
-    workspace_file_payload,
     workspace_root,
 )
 
 
 def tool_check_problem(problem_id: int | None = None, **_) -> str:
+    """Local-only memory index lookup. Does NOT call LeetCode API."""
     if not problem_id:
         return "请传入 problem_id。"
 
     memory = db.get_memory(problem_id)
-    result: dict = {"problem_id": problem_id}
     if memory:
-        result.update({
+        return json.dumps({
+            "problem_id": problem_id,
             "has_memory": True,
             "title": memory["title"],
             "difficulty": memory["difficulty"],
             "tags": memory["tags"],
             "memory_file": memory["memory_file"],
-        })
-    else:
-        result["has_memory"] = False
-        try:
-            from lc.leetcode_api import fetch_problem
-            problem = fetch_problem(problem_id)
-            result.update({
-                "title": problem.title,
-                "difficulty": problem.difficulty,
-                "tags": problem.tags,
-            })
-        except Exception:
-            result["message"] = "未找到该题目信息。"
+        }, ensure_ascii=False)
+    return json.dumps({
+        "problem_id": problem_id,
+        "has_memory": False,
+    }, ensure_ascii=False)
+
+
+def tool_display_problem(problem_id: int | None = None, **_) -> str:
+    """Pretty-render a problem's full detail to user via Rich panel + markdown.
+
+    Fetches from LeetCode (so description is guaranteed). Pure UI side-effect.
+    Prefer this over inlining description text when you want the user to see
+    the problem cleanly without consuming your own output budget.
+    """
+    if not problem_id:
+        return json.dumps(
+            {"error": True, "message": "请传入 problem_id。"},
+            ensure_ascii=False,
+        )
+    try:
+        from lc.leetcode_api import fetch_problem
+        problem = fetch_problem(problem_id)
+    except Exception as e:
+        return json.dumps(
+            {"error": True, "message": f"获取题目失败: {e}"},
+            ensure_ascii=False,
+        )
+    show_problem(problem)
+    return json.dumps({
+        "status": "displayed",
+        "problem_id": problem.id,
+        "title": problem.title,
+    }, ensure_ascii=False)
+
+
+def tool_fetch_problem_detail(
+    problem_id: int | None = None,
+    title_slug: str = "",
+    include_description: bool = True,
+    **_,
+) -> str:
+    """Fetch full problem detail from LeetCode API. Does NOT create any local files."""
+    if not problem_id and not title_slug:
+        return json.dumps(
+            {"error": True, "message": "请传入 problem_id 或 title_slug（至少一个）。"},
+            ensure_ascii=False,
+        )
+    try:
+        from lc.leetcode_api import fetch_problem, fetch_problem_by_slug
+        problem = (
+            fetch_problem_by_slug(title_slug) if title_slug
+            else fetch_problem(problem_id)
+        )
+    except Exception as e:
+        return json.dumps(
+            {"error": True, "message": f"获取题目失败: {e}"},
+            ensure_ascii=False,
+        )
+
+    result: dict = {
+        "problem_id": problem.id,
+        "title": problem.title,
+        "title_slug": problem.title_slug,
+        "difficulty": problem.difficulty,
+        "tags": problem.tags,
+    }
+    if include_description and problem.description:
+        result["description"] = problem.description
+    if problem.code_snippet:
+        result["code_snippet"] = problem.code_snippet
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -59,20 +114,7 @@ def tool_read_solution(file_path: str = "", problem_id: int | None = None, **_) 
         return f"路径不在工作区内: {file_path}"
     if not p.exists():
         return f"文件不存在: {file_path}"
-    content = p.read_text(encoding="utf-8")
-    # Extract problem_id from filename (e.g. "72_edit_distance.py" -> 72)
-    pid: int | None = None
-    try:
-        pid = int(p.stem.split("_")[0])
-    except (ValueError, IndexError):
-        pass
-    reminder = ""
-    if pid:
-        reminder = (
-            f"\n\n[reminder: 当你给出实质性指导后，"
-            f"记得调用 analyze_and_memorize(problem_id={pid}) 写入记忆]"
-        )
-    return content + reminder
+    return p.read_text(encoding="utf-8")
 
 
 def tool_find_problem_file(problem_id: int | None = None, **_) -> str:
@@ -88,67 +130,6 @@ def tool_find_problem_file(problem_id: int | None = None, **_) -> str:
     return json.dumps(
         {"problem_id": problem_id, "found": True,
          "file": relative_workspace_path(matches[0])},
-        ensure_ascii=False,
-    )
-
-
-def tool_search_workspace_files(keyword: str = "", **_) -> str:
-    keyword = (keyword or "").strip()
-    if not keyword:
-        return "请传入 keyword。"
-
-    needle = keyword.lower().replace(" ", "_")
-    matches = []
-    for path in problem_files_in_workspace():
-        rel = relative_workspace_path(path)
-        haystacks = {
-            path.stem.lower(),
-            rel.lower(),
-            path.parent.name.lower(),
-        }
-        if any(needle in h or keyword.lower() in h for h in haystacks):
-            matches.append(workspace_file_payload(path))
-        if len(matches) >= 10:
-            break
-
-    return json.dumps(
-        {"keyword": keyword, "matches": matches, "count": len(matches)},
-        ensure_ascii=False,
-    )
-
-
-def tool_list_category_problems(category: str = "", **_) -> str:
-    category = (category or "").strip()
-    if not category:
-        return "请传入 category。"
-
-    root = workspace_root()
-    raw = category.lower()
-    normalized = slugify(category)
-    matched_dirs = []
-    for child in root.iterdir():
-        if not child.is_dir():
-            continue
-        name = child.name.lower()
-        if name == raw or name == normalized or raw in name or normalized in name:
-            matched_dirs.append(child)
-
-    if not matched_dirs:
-        return json.dumps(
-            {"category": category, "matches": [], "count": 0,
-             "message": "当前工作区内未找到匹配的分类目录。"},
-            ensure_ascii=False,
-        )
-
-    directory = sorted(matched_dirs, key=lambda p: p.name)[0]
-    files = sorted(
-        (p for p in directory.glob("*.py") if p.is_file()),
-        key=lambda p: p.name,
-    )
-    matches = [workspace_file_payload(path) for path in files[:50]]
-    return json.dumps(
-        {"category": category, "directory": relative_workspace_path(directory),
-         "matches": matches, "count": len(matches)},
         ensure_ascii=False,
     )
 

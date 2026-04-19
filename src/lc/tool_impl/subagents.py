@@ -87,14 +87,16 @@ def tool_web_search(query: str = "", max_results: int = 5, **_) -> str:
     return json.dumps({"query": query, "results": items}, ensure_ascii=False)
 
 
-def tool_update_user_memory(*, client: OpenAI, messages: list[dict], **_) -> str:
+def tool_update_user_memory(hint: str = "", *, client: OpenAI, messages: list[dict], **_) -> str:
     existing = ""
     if USER_MEMORY_PATH.exists():
         existing = USER_MEMORY_PATH.read_text(encoding="utf-8").strip()
 
+    hint_block = f"\n特别提示（来自主 agent）：{hint}\n" if hint.strip() else ""
     task = (
         "你现在的任务是更新用户偏好记忆文件。"
-        "根据上面的对话上下文，提取用户表达的编码偏好、辅导偏好、习惯等个人偏好信息。\n\n"
+        "根据上面的对话上下文，提取用户表达的编码偏好、辅导偏好、习惯等个人偏好信息。"
+        f"{hint_block}\n"
         f"现有记忆文件内容：\n{existing or '（空）'}\n\n"
         "规则：\n"
         "- 输出完整的最终版记忆文件，你的输出会直接覆盖旧文件\n"
@@ -113,10 +115,13 @@ def tool_update_user_memory(*, client: OpenAI, messages: list[dict], **_) -> str
 
 
 def tool_find_similar_problems(problem_id: int | None = None,
+                               max_results: int = 3,
+                               criteria: str = "",
                                *, client: OpenAI, messages: list[dict], **_) -> str:
     if not problem_id:
         return "请传入 problem_id。"
 
+    max_results = min(max(1, max_results), 10)
     memory = db.get_memory(problem_id)
     if not memory:
         return f"第 {problem_id} 题没有记忆文件。"
@@ -136,12 +141,17 @@ def tool_find_similar_problems(problem_id: int | None = None,
 
     console.print("[dim]  ⚙ 正在查找相似题...[/dim]")
 
+    default_criteria = (
+        "算法思路相同、数据结构相同、解题模式相同（如都是滑动窗口、都是拓扑排序等）。"
+        "结合上面对话中用户正在解题的思路来判断相似性。"
+    )
+    criteria_block = criteria.strip() if criteria.strip() else default_criteria
+
     task = (
-        f"你现在的任务是从用户已做过的题目中，找出与第 {problem_id} 题算法思路最相似的题目（最多 3 道）。\n\n"
+        f"你现在的任务是从用户已做过的题目中，找出与第 {problem_id} 题最相似的题目（最多 {max_results} 道）。\n\n"
         f"当前题目：#{memory['problem_id']} {memory['title']} ({memory['difficulty']}) [{memory['tags']}]\n\n"
         f"已做过的题目：\n{problems_list}\n\n"
-        "相似性判断依据：算法思路相同、数据结构相同、解题模式相同（如都是滑动窗口、都是拓扑排序等）。\n"
-        "结合上面对话中用户正在解题的思路来判断相似性。\n\n"
+        f"相似性判断依据：{criteria_block}\n\n"
         '输出格式：每行一个题号（纯数字），不要其他内容。如果没有相似题就输出"无"。'
     )
     result = _sub_agent_call(client, messages, task, max_tokens=128)
@@ -156,7 +166,7 @@ def tool_find_similar_problems(problem_id: int | None = None,
             nums = re.findall(r"\d+", line)
             if nums:
                 similar_ids.append(int(nums[0]))
-        similar_ids = similar_ids[:3]
+        similar_ids = similar_ids[:max_results]
 
     similar_results = []
     hallucination_count = 0
@@ -188,7 +198,19 @@ def tool_find_similar_problems(problem_id: int | None = None,
     return json.dumps(result_data, ensure_ascii=False)
 
 
+_DEFAULT_MEMO_SECTIONS = ["解题思路", "踩坑记录", "关键收获", "复杂度"]
+
+_SECTION_HINTS = {
+    "解题思路": "用了什么算法/数据结构，核心想法",
+    "踩坑记录": "遇到的错误、走过的弯路",
+    "关键收获": "这道题学到了什么",
+    "复杂度": "时间和空间复杂度",
+}
+
+
 def tool_analyze_and_memorize(problem_id: int | None = None,
+                              sections: list | None = None,
+                              focus: str = "",
                               *, client: OpenAI, messages: list[dict], **_) -> str:
     if not problem_id:
         return "请传入 problem_id。"
@@ -209,19 +231,26 @@ def tool_analyze_and_memorize(problem_id: int | None = None,
 
     console.print("[dim]  ⚙ 正在生成题目总结...[/dim]")
 
+    effective_sections = [s for s in (sections or _DEFAULT_MEMO_SECTIONS) if isinstance(s, str) and s.strip()]
+    if not effective_sections:
+        effective_sections = _DEFAULT_MEMO_SECTIONS
+
+    section_lines = "\n".join(
+        f"   - ## {name}" + (f"：{_SECTION_HINTS[name]}" if name in _SECTION_HINTS else "")
+        for name in effective_sections
+    )
+    focus_block = f"\n**额外关注点**：{focus.strip()}\n" if focus.strip() else ""
+
     task = (
         f"你现在的任务是为第 {problem_id} 题写一份做题总结记忆。\n\n"
         f"题目：#{memory['problem_id']} {memory['title']} ({memory['difficulty']}) [{memory['tags']}]\n\n"
         f"用户代码：\n```python\n{solution_code or '（未找到代码文件）'}\n```\n\n"
         f"现有记忆：\n{existing_l3 or '（空）'}\n\n"
-        "根据上面的对话上下文（你给的提示、发现的错误、用户的思路等）和用户代码，生成总结。\n\n"
+        f"根据上面的对话上下文（你给的提示、发现的错误、用户的思路等）和用户代码，生成总结。{focus_block}\n"
         "记忆格式（markdown）：\n"
         "1. 保留文件开头的题目元信息（标题、难度、标签、链接）\n"
-        "2. 追加或更新以下内容：\n"
-        "   - ## 解题思路：用了什么算法/数据结构，核心想法\n"
-        "   - ## 踩坑记录：遇到的错误、走过的弯路\n"
-        "   - ## 关键收获：这道题学到了什么\n"
-        "   - ## 复杂度：时间和空间复杂度\n\n"
+        "2. 追加或更新以下 section（每个独立 ## 标题，按给定顺序）：\n"
+        f"{section_lines}\n\n"
         "规则：\n"
         "- 输出完整的最终版记忆文件，你的输出会直接覆盖旧文件\n"
         "- 保留现有记忆中有价值的部分，整合新信息，每个 ## 标题只出现一次\n"

@@ -5,14 +5,9 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
-from typing import TYPE_CHECKING
-
 from rich.theme import Theme
 
 from lc.models import Problem
-
-if TYPE_CHECKING:
-    from lc.codetop_api import CodetopProblem
 
 _THEME = Theme({
     "markdown.code": "bold cyan",
@@ -37,54 +32,6 @@ def show_problem(problem: Problem) -> None:
     if problem.description:
         console.print()
         console.print(Markdown(problem.description))
-    console.print()
-
-
-def show_daily_plan(plan) -> None:
-    if not plan.new_problems:
-        console.print("[green]今天没有需要做的题目！[/green]")
-        return
-
-    if plan.new_problems:
-        table = Table(title="推荐题目", border_style="green")
-        table.add_column("#", style="cyan", width=6)
-        table.add_column("题目", style="white")
-        table.add_column("难度", width=8)
-        for problem in plan.new_problems:
-            diff_color = DIFFICULTY_COLORS.get(problem.difficulty, "white")
-            table.add_row(
-                str(problem.id),
-                problem.title,
-                f"[{diff_color}]{problem.difficulty}[/{diff_color}]",
-            )
-        console.print(table)
-
-    console.print()
-
-
-def show_hot_problems(
-    problems: list[CodetopProblem],
-    practiced_ids: set[int],
-    company: str | None = None,
-) -> None:
-    title = f"高频题 — {company}" if company else "高频题 — 全站"
-    table = Table(title=title, border_style="magenta")
-    table.add_column("#", style="cyan", width=6)
-    table.add_column("题目", style="white")
-    table.add_column("难度", width=8)
-    table.add_column("频率", style="magenta", justify="right")
-    table.add_column("状态", width=6, justify="center")
-    for cp in problems:
-        diff_color = DIFFICULTY_COLORS.get(cp.difficulty, "white")
-        status = "[green]已做[/green]" if cp.leetcode_id in practiced_ids else "[dim]新题[/dim]"
-        table.add_row(
-            str(cp.leetcode_id),
-            cp.title,
-            f"[{diff_color}]{cp.difficulty}[/{diff_color}]",
-            str(cp.frequency),
-            status,
-        )
-    console.print(table)
     console.print()
 
 
