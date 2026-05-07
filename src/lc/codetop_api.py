@@ -48,32 +48,41 @@ def _get(path: str, params: dict, retries: int = 2) -> dict:
     return {}
 
 
+# 1-hour TTL: long-running sessions still see new tags / companies eventually.
+_CACHE_TTL_SECONDS = 3600
+
 _companies_cache: list[dict] | None = None
+_companies_cache_time: float = 0.0
 
 
 def fetch_companies() -> list[dict]:
-    """Return list of {'id': int, 'name': str} (cached)."""
-    global _companies_cache
-    if _companies_cache is not None:
+    """Return list of {'id': int, 'name': str} (cached with TTL)."""
+    global _companies_cache, _companies_cache_time
+    now = time.time()
+    if _companies_cache is not None and (now - _companies_cache_time) < _CACHE_TTL_SECONDS:
         return _companies_cache
     data = _get("/companies/", {})
     if isinstance(data, list):
         _companies_cache = [{"id": c["id"], "name": c["name"]} for c in data]
+        _companies_cache_time = now
         return _companies_cache
     return []
 
 
 _tags_cache: list[dict] | None = None
+_tags_cache_time: float = 0.0
 
 
 def fetch_tags() -> list[dict]:
-    """Return list of {'id': int, 'name': str} from CodeTop tags API (cached)."""
-    global _tags_cache
-    if _tags_cache is not None:
+    """Return list of {'id': int, 'name': str} from CodeTop tags API (cached with TTL)."""
+    global _tags_cache, _tags_cache_time
+    now = time.time()
+    if _tags_cache is not None and (now - _tags_cache_time) < _CACHE_TTL_SECONDS:
         return _tags_cache
     data = _get("/tags/", {})
     if isinstance(data, list):
         _tags_cache = [{"id": t["id"], "name": t["name"]} for t in data]
+        _tags_cache_time = now
         return _tags_cache
     return []
 
@@ -155,9 +164,16 @@ def expand_tag_synonyms(tag: str) -> list[str]:
 
 
 def _find_tag_id(tag_name: str) -> int | None:
-    """Find CodeTop tag ID by name (exact then fuzzy, supports English input)."""
+    """Find CodeTop tag ID by name (exact then fuzzy, supports English input).
+
+    Requires `tag_name.strip()` to be at least 2 chars — single chars or
+    whitespace would substring-match arbitrary tags ("a" → "Array", " " →
+    "Hash Table") and silently inject the wrong filter.
+    """
+    tag_lower = (tag_name or "").strip().lower()
+    if len(tag_lower) < 2:
+        return None
     tags = fetch_tags()
-    tag_lower = tag_name.lower()
 
     # Try exact match first
     for t in tags:

@@ -15,17 +15,25 @@ from lc.workspace import (
 def tool_check_problem(problem_id: int | None = None, **_) -> str:
     """Local-only memory index lookup. Does NOT call LeetCode API."""
     if not problem_id:
-        return "请传入 problem_id。"
+        return json.dumps(
+            {"error": True, "message": "请传入 problem_id。"},
+            ensure_ascii=False,
+        )
 
     memory = db.get_memory(problem_id)
     if memory:
+        # Verify the file actually exists on disk — DB index can outlive the file
+        # (user deleted manually, or DB was populated in a different workspace).
+        memory_file = memory["memory_file"]
+        memory_file_exists = Path(memory_file).exists()
         return json.dumps({
             "problem_id": problem_id,
             "has_memory": True,
             "title": memory["title"],
             "difficulty": memory["difficulty"],
             "tags": memory["tags"],
-            "memory_file": memory["memory_file"],
+            "memory_file": memory_file,
+            "memory_file_exists": memory_file_exists,
         }, ensure_ascii=False)
     return json.dumps({
         "problem_id": problem_id,
@@ -103,23 +111,44 @@ def tool_read_solution(file_path: str = "", problem_id: int | None = None, **_) 
     if not file_path and problem_id:
         matches = list(workspace_root().glob(f"**/{problem_id}_*.py"))
         if not matches:
-            return f"当前工作区内未找到第 {problem_id} 题的本地文件。"
+            return json.dumps({
+                "status": "error",
+                "message": f"当前工作区内未找到第 {problem_id} 题的本地文件。",
+            }, ensure_ascii=False)
         file_path = str(matches[0])
     if not file_path:
-        return "请传入 file_path 或 problem_id 参数。"
+        return json.dumps(
+            {"status": "error", "message": "请传入 file_path 或 problem_id 参数。"},
+            ensure_ascii=False,
+        )
     p = Path(file_path).resolve()
     try:
         p.relative_to(workspace_root())
     except ValueError:
-        return f"路径不在工作区内: {file_path}"
+        return json.dumps(
+            {"status": "error", "message": f"路径不在工作区内: {file_path}"},
+            ensure_ascii=False,
+        )
     if not p.exists():
-        return f"文件不存在: {file_path}"
-    return p.read_text(encoding="utf-8")
+        return json.dumps(
+            {"status": "error", "message": f"文件不存在: {file_path}"},
+            ensure_ascii=False,
+        )
+    content = p.read_text(encoding="utf-8")
+    return json.dumps({
+        "status": "ok",
+        "file_path": relative_workspace_path(p),
+        "bytes": len(content.encode("utf-8")),
+        "content": content,
+    }, ensure_ascii=False)
 
 
 def tool_find_problem_file(problem_id: int | None = None, **_) -> str:
     if not problem_id:
-        return "请传入 problem_id。"
+        return json.dumps(
+            {"error": True, "message": "请传入 problem_id。"},
+            ensure_ascii=False,
+        )
     matches = list(workspace_root().glob(f"**/{problem_id}_*.py"))
     if not matches:
         return json.dumps(
@@ -127,26 +156,67 @@ def tool_find_problem_file(problem_id: int | None = None, **_) -> str:
              "message": f"当前工作区内未找到第 {problem_id} 题的本地文件。"},
             ensure_ascii=False,
         )
-    return json.dumps(
-        {"problem_id": problem_id, "found": True,
-         "file": relative_workspace_path(matches[0])},
-        ensure_ascii=False,
-    )
+    payload: dict = {
+        "problem_id": problem_id,
+        "found": True,
+        "file": relative_workspace_path(matches[0]),
+        "total_matches": len(matches),
+    }
+    if len(matches) > 1:
+        # Multiple files (e.g. classifier non-determinism placed copies in
+        # different category folders). Surface all so caller can pick or clean up.
+        payload["all_files"] = [relative_workspace_path(m) for m in matches]
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def tool_append_solution(file_path: str = "", content: str = "", **_) -> str:
     if not file_path:
-        return "请传入 file_path 参数。"
+        return json.dumps(
+            {"status": "error", "message": "请传入 file_path 参数。"},
+            ensure_ascii=False,
+        )
+    if not content:
+        return json.dumps(
+            {"status": "error", "message": "请传入 content 参数。"},
+            ensure_ascii=False,
+        )
     p = Path(file_path).resolve()
     try:
         p.relative_to(workspace_root())
     except ValueError:
-        return f"路径不在工作区内: {file_path}"
+        return json.dumps(
+            {"status": "error", "message": f"路径不在工作区内: {file_path}"},
+            ensure_ascii=False,
+        )
     if not p.exists():
-        return f"文件不存在: {file_path}"
+        return json.dumps(
+            {"status": "error", "message": f"文件不存在: {file_path}"},
+            ensure_ascii=False,
+        )
+    if p.suffix != ".py":
+        # Guard: this tool is meant for solution files only. Without this check
+        # the model could append code into LeetCode.md / .gitignore / etc.
+        return json.dumps(
+            {"status": "error",
+             "message": f"只能追加到 .py 解题文件: {file_path}"},
+            ensure_ascii=False,
+        )
+
+    existing = p.read_text(encoding="utf-8")
+    stripped = content.strip()
+    if stripped and stripped in existing:
+        return json.dumps({
+            "status": "skipped_duplicate",
+            "file": file_path,
+            "message": "内容已存在于文件中，未重复追加。",
+        }, ensure_ascii=False)
+
+    payload = "\n\n# ─── 参考解法 ───\n\n" + content + "\n"
     with p.open("a", encoding="utf-8") as f:
-        f.write("\n\n# ─── 参考解法 ───\n\n")
-        f.write(content)
-        f.write("\n")
+        f.write(payload)
     console.print(f"[dim]参考解法已追加到 {file_path}[/dim]")
-    return f"已追加到 {file_path}"
+    return json.dumps({
+        "status": "appended",
+        "file": file_path,
+        "bytes_added": len(payload.encode("utf-8")),
+    }, ensure_ascii=False)

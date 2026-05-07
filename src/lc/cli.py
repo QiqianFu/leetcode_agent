@@ -5,7 +5,7 @@ from rich.panel import Panel
 
 from lc import db
 from lc.config import DATA_DIR
-from lc.display import DIFFICULTY_COLORS, console, show_companies, show_tags
+from lc.display import console, show_companies, show_tags
 
 DIFFICULTY_CHOICES = {"easy": "Easy", "medium": "Medium", "hard": "Hard"}
 
@@ -76,7 +76,9 @@ def handle_config() -> None:
     console.print()
     current_mode = get_config("mode") or "default"
     if current_mode == "tag":
-        current_mode = "default"  # migrate old "tag" mode
+        # Migrate legacy mode and persist so welcome screen / tools see clean value.
+        set_config("mode", "default")
+        current_mode = "default"
     mode = Prompt.ask(
         "排序方式",
         choices=["default", "random"],
@@ -96,24 +98,29 @@ def handle_config() -> None:
     if tags:
         show_tags(tags)
     tag_input = Prompt.ask(tag_prompt, default="")
-    if tag_input.strip() and tags:
-        tag_names = [t["name"] for t in tags]
-        if tag_input in tag_names:
-            set_config("tag", tag_input)
-            console.print(f"[green]标签已设置为: {tag_input}[/green]")
-        else:
-            matches = [n for n in tag_names if tag_input.lower() in n.lower()]
-            if matches:
-                set_config("tag", matches[0])
-                console.print(f"[green]标签已设置为: {matches[0]}[/green]")
-            else:
-                console.print(f"[red]未找到「{tag_input}」，标签设置未更改。[/red]")
-    else:
+    tag_input_stripped = tag_input.strip()
+    if not tag_input_stripped:
+        # 空输入 = 显式清除/跳过
         if current_tag:
             set_config("tag", "")
             console.print("[green]标签过滤已清除[/green]")
         else:
             console.print("[dim]标签: 跳过[/dim]")
+    elif not tags:
+        # 用户输入了标签但拉取失败 — 不要误清除原值
+        console.print("[red]无法获取标签列表（网络问题？），标签设置未更改。[/red]")
+    else:
+        tag_names = [t["name"] for t in tags]
+        if tag_input_stripped in tag_names:
+            set_config("tag", tag_input_stripped)
+            console.print(f"[green]标签已设置为: {tag_input_stripped}[/green]")
+        else:
+            matches = [n for n in tag_names if tag_input_stripped.lower() in n.lower()]
+            if matches:
+                set_config("tag", matches[0])
+                console.print(f"[green]标签已设置为: {matches[0]}[/green]")
+            else:
+                console.print(f"[red]未找到「{tag_input_stripped}」，标签设置未更改。[/red]")
 
     # ── 汇总 ──
     console.print()
@@ -383,9 +390,16 @@ def show_welcome() -> None:
 
 
 
+def _migrate_legacy_config() -> None:
+    """One-time persisted migration of stale config values."""
+    if get_config("mode") == "tag":
+        set_config("mode", "default")
+
+
 def app() -> None:
     """Main REPL entry point."""
     db.init_db()
+    _migrate_legacy_config()
     show_welcome()
 
     from lc.agent import Agent

@@ -148,8 +148,11 @@ def classify_problem(problem: Problem, client: OpenAI) -> str:
             max_tokens=20,
         )
         answer = resp.choices[0].message.content.strip().lower()
+        # Normalize spaces / hyphens to underscores so AI replies like "two
+        # pointers" or "stack-queue" match our underscore-form CATEGORIES.
+        answer_norm = re.sub(r"[\s\-]+", "_", answer)
         for cat in CATEGORIES:
-            if cat in answer:
+            if cat in answer_norm:
                 return cat
     except Exception:
         pass
@@ -170,11 +173,14 @@ def get_memory_path(problem: Problem) -> Path:
     return memory_dir() / f"{problem.id}_{slugify(problem.title)}.md"
 
 
-def create_memory_file(problem: Problem) -> Path:
-    """Create an initial memory file for a problem."""
+def create_memory_file(problem: Problem) -> tuple[Path, bool]:
+    """Create an initial memory file for a problem.
+
+    Returns (path, created) — created is False if the file already existed.
+    """
     memory_path = get_memory_path(problem)
     if memory_path.exists():
-        return memory_path
+        return memory_path, False
 
     lines = [
         f"# {problem.id}. {problem.title}",
@@ -184,10 +190,14 @@ def create_memory_file(problem: Problem) -> Path:
         "",
     ]
     memory_path.write_text("\n".join(lines), encoding="utf-8")
-    return memory_path
+    return memory_path, True
 
 
-def create_solution_file(problem: Problem) -> Path:
+def create_solution_file(problem: Problem) -> tuple[Path, bool]:
+    """Create a solution file for a problem.
+
+    Returns (path, created) — created is False if the file already existed.
+    """
     category = slugify(problem.category or pick_category_heuristic(problem.tags))
     dir_path = Path.cwd() / category
     dir_path.mkdir(exist_ok=True)
@@ -196,7 +206,7 @@ def create_solution_file(problem: Problem) -> Path:
     file_path = dir_path / filename
 
     if file_path.exists():
-        return file_path
+        return file_path, False
 
     lines = [
         f"# {problem.id}. {problem.title}",
@@ -225,13 +235,24 @@ def create_solution_file(problem: Problem) -> Path:
 
     lines.append("")
     file_path.write_text("\n".join(lines), encoding="utf-8")
-    return file_path
+    return file_path, True
 
 
 # ─── Shared action ───
 
-def start_problem(problem_id: int, client: OpenAI) -> tuple[Problem, Path, Path] | str:
-    """Start a problem. Returns (problem, solution_path, memory_path) on success, error str on failure."""
+def start_problem(
+    problem_id: int, client: OpenAI
+) -> tuple[Problem, Path, Path, dict] | str:
+    """Start a problem.
+
+    Returns (problem, solution_path, memory_path, flags) on success; error str on failure.
+    `flags` carries observables so callers can tell fresh-start from resume:
+        - solution_preexisted, memory_preexisted, db_entry_preexisted: bool
+        - memory_has_l3_content: bool (substantial L3 beyond header template)
+        - cross_workspace_db_overwrite: bool (existing DB entry pointed at a
+          different memory_file path → likely a different workspace; overwriting
+          the index orphans the prior workspace's L3 lookup)
+    """
     try:
         from lc.leetcode_api import fetch_problem
         with console.status("[bold cyan]正在获取题目...[/bold cyan]"):
@@ -242,13 +263,39 @@ def start_problem(problem_id: int, client: OpenAI) -> tuple[Problem, Path, Path]
     with console.status("[bold cyan]分类中...[/bold cyan]"):
         problem.category = classify_problem(problem, client)
 
-    file_path = create_solution_file(problem)
-    memory_path = create_memory_file(problem)
+    existing = db.get_memory(problem.id)
+    db_entry_preexisted = existing is not None
+    file_path, solution_created = create_solution_file(problem)
+    memory_path, memory_created = create_memory_file(problem)
+
+    # Detect substantial L3 content (vs. just the initial header template).
+    # Kept inline to avoid importing from lc.tool_impl.subagents (circular).
+    memory_has_l3_content = False
+    try:
+        memory_has_l3_content = "\n## " in memory_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
 
     rel_memory = str(memory_path.relative_to(Path.cwd()))
+
+    # Cross-workspace clash: DB index points at a memory_file that differs from
+    # this workspace's path (or its abs-resolved version exists elsewhere).
+    cross_workspace_db_overwrite = False
+    if existing:
+        existing_file = existing.get("memory_file") or ""
+        if existing_file and existing_file != rel_memory:
+            cross_workspace_db_overwrite = True
+
     db.upsert_memory(problem.id, problem.title, rel_memory,
                      difficulty=problem.difficulty,
                      tags=", ".join(problem.tags))
 
     rel_path = file_path.relative_to(Path.cwd())
-    return problem, rel_path, memory_path
+    flags = {
+        "solution_preexisted": not solution_created,
+        "memory_preexisted": not memory_created,
+        "db_entry_preexisted": db_entry_preexisted,
+        "memory_has_l3_content": memory_has_l3_content,
+        "cross_workspace_db_overwrite": cross_workspace_db_overwrite,
+    }
+    return problem, rel_path, memory_path, flags

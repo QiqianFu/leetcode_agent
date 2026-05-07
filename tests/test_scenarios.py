@@ -264,8 +264,8 @@ class TestPickFromCodetopDifficultyCase:
         ))
         monkeypatch.setattr("lc.codetop_api._find_tag_id", lambda _: None)
         for variant in ("easy", "EASY", "Easy"):
-            r = planner_mod._pick_from_codetop(difficulty=variant, limit=5)
-            assert len(r) == 1, f"case variant {variant!r} failed"
+            candidates, _stats = planner_mod._pick_from_codetop(difficulty=variant, limit=5)
+            assert len(candidates) == 1, f"case variant {variant!r} failed"
 
 
 class TestReactLoopRollback:

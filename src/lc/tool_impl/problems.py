@@ -15,7 +15,11 @@ from lc.workspace import start_problem
 # ─── Pure data reads (no UI, no hidden state) ───
 
 def tool_search_leetcode(keyword: str = "", limit: int = 5, **_) -> str:
-    """Search LeetCode by English keyword. Returns candidate list JSON (no UI)."""
+    """Search LeetCode by English keyword. Returns candidate list JSON (no UI).
+
+    Each result is annotated with `already_practiced` so the model doesn't
+    accidentally recommend a problem the user has already started.
+    """
     if not keyword:
         return json.dumps(
             {"error": True, "message": "请传入 keyword 参数。"},
@@ -31,6 +35,8 @@ def tool_search_leetcode(keyword: str = "", limit: int = 5, **_) -> str:
              "message": f"没有找到与「{keyword}」相关的题目。"},
             ensure_ascii=False,
         )
+
+    practiced_ids = db.get_practiced_problem_ids()
     return json.dumps({
         "keyword": keyword,
         "problems": [
@@ -41,6 +47,7 @@ def tool_search_leetcode(keyword: str = "", limit: int = 5, **_) -> str:
                 "tags": p.tags,
                 "ac_rate": p.ac_rate,
                 "title_slug": p.title_slug,
+                "already_practiced": p.id in practiced_ids,
             }
             for p in results
         ],
@@ -69,7 +76,7 @@ def tool_list_hot_problems(
     eff_randomize = randomize if randomize is not None else (get_config("mode") == "random")
     limit = min(max(1, limit), 30)
 
-    candidates = _pick_from_codetop(
+    candidates, stats = _pick_from_codetop(
         company=eff_company,
         difficulty=eff_difficulty,
         tag=eff_tag,
@@ -82,13 +89,29 @@ def tool_list_hot_problems(
         "tag": eff_tag,
         "difficulty": eff_difficulty,
         "randomize": eff_randomize,
+        # Surface whether CodeTop actually applied the user's tag — when False
+        # the candidates ignored the tag filter, so used_filters.tag is what
+        # was *requested*, not what was applied.
+        "tag_resolved": stats.get("tag_resolved", True),
     }
 
     if not candidates:
+        # Let the model distinguish "filter too strict" from "user has done them all"
+        if stats["scanned_count"] == 0:
+            reason = "empty_pool"
+            message = "CodeTop 在这组筛选条件下没有返回任何题目。"
+        elif stats["filtered_practiced"] >= stats["scanned_count"] * 0.8:
+            reason = "all_practiced"
+            message = f"扫描的 {stats['scanned_count']} 道题中 {stats['filtered_practiced']} 道用户已做过，池子几乎被清空。建议放宽条件或切换 company。"
+        else:
+            reason = "filter_too_strict"
+            message = "筛选太严格（多数被难度/tag 过滤）。可尝试放宽条件。"
         return json.dumps({
             "problems": [],
             "used_filters": used_filters,
-            "message": "没有找到未做过的高频题。可尝试放宽筛选条件（去掉 tag/difficulty 或切换 company）。",
+            "stats": stats,
+            "reason": reason,
+            "message": message,
         }, ensure_ascii=False)
 
     return json.dumps({
@@ -102,6 +125,7 @@ def tool_list_hot_problems(
             for p in candidates
         ],
         "used_filters": used_filters,
+        "stats": stats,
         "note": "已自动过滤用户已做过的题目。",
     }, ensure_ascii=False)
 
@@ -121,6 +145,7 @@ def tool_list_practiced(
 
     limit = min(max(1, limit), 200)
     all_memories = db.get_all_memories()
+    total_in_db = len(all_memories)
 
     filtered = []
     tag_synonyms = expand_tag_synonyms(tag) if (tag or "").strip() else []
@@ -142,6 +167,7 @@ def tool_list_practiced(
 
     truncated = len(filtered) > limit
     return json.dumps({
+        "total_in_db": total_in_db,
         "total_matched": len(filtered),
         "returned": min(len(filtered), limit),
         "truncated": truncated,
@@ -171,7 +197,12 @@ def tool_let_user_pick(choices: list | None = None, prompt: str = "", **_) -> st
     for c in choices:
         if not isinstance(c, dict) or "id" not in c:
             continue
-        label = f"#{c['id']} {c.get('title', '')}"
+        title = (c.get("title") or "").strip()
+        if not title:
+            # schema requires title; without it the user sees a meaningless
+            # "#123 (Medium)" row — better to drop the entry.
+            continue
+        label = f"#{c['id']} {title}"
         if c.get("difficulty"):
             label += f" ({c['difficulty']})"
         formatted.append((label, c))
@@ -179,14 +210,15 @@ def tool_let_user_pick(choices: list | None = None, prompt: str = "", **_) -> st
     if not formatted:
         return json.dumps(
             {"error": True,
-             "message": "choices 格式错误，应为 [{id, title, difficulty}, ...]。"},
+             "message": "choices 格式错误，每项需要至少 id 和非空 title，应为 [{id, title, difficulty}, ...]。"},
             ensure_ascii=False,
         )
 
     selected = arrow_select(formatted)
-    if not selected:
+    if selected is None:
         return json.dumps(
-            {"status": "cancelled", "message": "用户取消选择。"},
+            {"status": "cancelled",
+             "message": "用户按 q/Esc 取消选择，或终端未能完成交互。"},
             ensure_ascii=False,
         )
 
@@ -204,16 +236,35 @@ def tool_start_problem(problem_id: int | None = None, *, client: OpenAI, **_) ->
     result = start_problem(problem_id, client)
     if isinstance(result, str):
         return result
-    problem, rel_path, memory_path = result
+    problem, rel_path, memory_path, flags = result
+
+    # Rollup state so the model can switch behavior at a glance:
+    # - created:  everything fresh — proceed with new-problem guidance
+    # - resumed:  all three (solution file, memory file, DB entry) pre-existed — consider read_memory/read_solution first
+    # - partial:  some pre-existed, some not — state was inconsistent (e.g. user deleted a file manually)
+    preexisted_count = sum([
+        flags["solution_preexisted"],
+        flags["memory_preexisted"],
+        flags["db_entry_preexisted"],
+    ])
+    if preexisted_count == 0:
+        state = "created"
+    elif preexisted_count == 3:
+        state = "resumed"
+    else:
+        state = "partial"
+
     return json.dumps(
         {
             "status": "started",
+            "state": state,
             "problem_id": problem.id,
             "problem": f"{problem.id}. {problem.title}",
             "difficulty": problem.difficulty,
             "tags": problem.tags,
             "file": str(rel_path),
             "memory_file": str(memory_path.relative_to(Path.cwd())),
+            **flags,
         },
         ensure_ascii=False,
     )

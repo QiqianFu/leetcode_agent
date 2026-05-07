@@ -135,23 +135,26 @@ def _parse_problem_detail(title_slug: str, ac_rate: float | None = None) -> Prob
 
 
 def fetch_problem(problem_id: int) -> Problem:
-    """Fetch a problem by its frontend ID. Two API calls: list search + detail."""
-    data = _graphql(PROBLEM_LIST_QUERY, {
-        "categorySlug": "",
-        "limit": 5,
-        "skip": 0,
-        "filters": {"searchKeywords": str(problem_id)},
-    })
-    questions = data.get("problemsetQuestionList", {}).get("questions", [])
-    match = None
-    for q in questions:
-        if str(q["frontendQuestionId"]) == str(problem_id):
-            match = q
-            break
-    if match is None:
-        raise ValueError(f"Problem #{problem_id} not found on LeetCode")
+    """Fetch a problem by its frontend ID. Two API calls: list search + detail.
 
-    return _parse_problem_detail(match["titleSlug"], ac_rate=match.get("acRate"))
+    LeetCode's GraphQL has no by-ID lookup, so we abuse `searchKeywords` to find
+    the listing entry. If the small first batch (limit=5) doesn't include the
+    target — possible when search results put unrelated title-text matches
+    above the ID match — we retry with a wider window before giving up.
+    """
+    target = str(problem_id)
+    for limit in (5, 25):
+        data = _graphql(PROBLEM_LIST_QUERY, {
+            "categorySlug": "",
+            "limit": limit,
+            "skip": 0,
+            "filters": {"searchKeywords": target},
+        })
+        questions = data.get("problemsetQuestionList", {}).get("questions", [])
+        for q in questions:
+            if str(q["frontendQuestionId"]) == target:
+                return _parse_problem_detail(q["titleSlug"], ac_rate=q.get("acRate"))
+    raise ValueError(f"Problem #{problem_id} not found on LeetCode")
 
 
 def fetch_problem_by_slug(title_slug: str) -> Problem:

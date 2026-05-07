@@ -65,7 +65,10 @@ def _has_l3_content(memory_file: str) -> bool:
 
 def tool_web_search(query: str = "", max_results: int = 5, **_) -> str:
     if not query:
-        return "请传入 query 参数。"
+        return json.dumps(
+            {"error": True, "message": "请传入 query 参数。"},
+            ensure_ascii=False,
+        )
     max_results = min(max(1, max_results), 10)
     try:
         from ddgs import DDGS
@@ -85,6 +88,13 @@ def tool_web_search(query: str = "", max_results: int = 5, **_) -> str:
         for r in results
     ]
     return json.dumps({"query": query, "results": items}, ensure_ascii=False)
+
+
+# Refuse to overwrite existing memory if sub-agent output is <30% of the
+# original size AND the original was non-trivial (>200 bytes). Protects against
+# sub-agent "forgetting" user preferences and producing a near-empty file.
+_MEMORY_SHRINKAGE_REFUSE_RATIO = 0.3
+_MEMORY_SHRINKAGE_MIN_EXISTING_BYTES = 200
 
 
 def tool_update_user_memory(hint: str = "", *, client: OpenAI, messages: list[dict], **_) -> str:
@@ -108,10 +118,36 @@ def tool_update_user_memory(hint: str = "", *, client: OpenAI, messages: list[di
     )
     result = _sub_agent_call(client, messages, task)
     if not result:
-        return "更新用户偏好记忆失败（子 agent 无响应）。"
+        return json.dumps({
+            "status": "failed",
+            "reason": "subagent_empty",
+            "message": "子 agent 无响应或返回空，L2 记忆未变动。",
+        }, ensure_ascii=False)
 
-    USER_MEMORY_PATH.write_text(result, encoding="utf-8")
-    return "已更新用户偏好记忆。"
+    before_bytes = len(existing.encode("utf-8"))
+    proposed = result.strip()
+    after_bytes = len(proposed.encode("utf-8"))
+
+    if (before_bytes > _MEMORY_SHRINKAGE_MIN_EXISTING_BYTES
+            and after_bytes < before_bytes * _MEMORY_SHRINKAGE_REFUSE_RATIO):
+        return json.dumps({
+            "status": "refused",
+            "reason": "suspicious_shrinkage",
+            "before_bytes": before_bytes,
+            "proposed_bytes": after_bytes,
+            "message": "子 agent 产出的新内容不到旧内容 30%，疑似坍塌，已拒绝覆盖。",
+        }, ensure_ascii=False)
+
+    changed = proposed != existing
+    # Write the stripped form so reported after_bytes matches what's on disk;
+    # mismatches break the next round's shrinkage check.
+    USER_MEMORY_PATH.write_text(proposed, encoding="utf-8")
+    return json.dumps({
+        "status": "updated",
+        "changed": changed,
+        "before_bytes": before_bytes,
+        "after_bytes": after_bytes,
+    }, ensure_ascii=False)
 
 
 def tool_find_similar_problems(problem_id: int | None = None,
@@ -170,14 +206,23 @@ def tool_find_similar_problems(problem_id: int | None = None,
 
     similar_results = []
     hallucination_count = 0
+    missing_file_count = 0
     for pid in similar_ids:
         sim_memory = db.get_memory(pid)
         if not sim_memory:
             hallucination_count += 1
             continue
+        mem_path = Path(sim_memory["memory_file"])
+        if not mem_path.exists():
+            missing_file_count += 1
+            continue
         if not _has_l3_content(sim_memory["memory_file"]):
             continue
-        sim_content = Path(sim_memory["memory_file"]).read_text(encoding="utf-8")
+        try:
+            sim_content = mem_path.read_text(encoding="utf-8")
+        except Exception:
+            missing_file_count += 1
+            continue
         similar_results.append({
             "problem_id": pid,
             "title": sim_memory["title"],
@@ -185,16 +230,29 @@ def tool_find_similar_problems(problem_id: int | None = None,
             "tags": sim_memory["tags"],
             "memory": sim_content,
         })
-    if hallucination_count > 1:
-        similar_results = []
 
-    result_data: dict = {"problem_id": problem_id, "similar_problems": similar_results}
-    if similar_results:
-        result_data["instruction"] = (
-            "请告诉用户这道题与以下已做过的题目思路相似，可以从类似方向思考。"
-            "同时根据相似题的历史记忆，分析用户是否有进步/退步/风格变化，"
-            "如果发现有值得记录的变化，请调用 update_user_memory。"
+    result_data: dict = {
+        "problem_id": problem_id,
+        "similar_problems": similar_results,
+        "candidate_count": len(similar_ids),
+    }
+    if hallucination_count > 1:
+        # Sub-agent produced multiple IDs that aren't in DB → untrustworthy run.
+        # Don't return the partial results; signal the problem so the model can
+        # retry with different criteria or skip.
+        result_data["similar_problems"] = []
+        result_data["reason"] = "subagent_hallucinated"
+        result_data["hallucination_count"] = hallucination_count
+        result_data["message"] = (
+            "子 agent 返回了多个不存在的题号，结果不可信，已丢弃。可换条件重试或跳过相似题。"
         )
+    else:
+        # Single hallucination: keep valid results but still surface the count
+        # so the caller can judge whether to trust the output.
+        if hallucination_count == 1:
+            result_data["dropped_hallucinations"] = 1
+        if missing_file_count > 0:
+            result_data["stale_entries"] = missing_file_count
     return json.dumps(result_data, ensure_ascii=False)
 
 
@@ -260,8 +318,35 @@ def tool_analyze_and_memorize(problem_id: int | None = None,
     l3_result = _sub_agent_call(client, messages, task)
 
     if not l3_result:
-        return json.dumps({"l3_written": False, "problem_id": problem_id,
-                           "message": "总结生成失败。"}, ensure_ascii=False)
+        return json.dumps({
+            "l3_written": False,
+            "problem_id": problem_id,
+            "reason": "subagent_empty",
+            "message": "子 agent 未产出内容，L3 记忆未变动。",
+        }, ensure_ascii=False)
 
-    memory_path.write_text(l3_result, encoding="utf-8")
-    return json.dumps({"l3_written": True, "problem_id": problem_id}, ensure_ascii=False)
+    before_bytes = len(existing_l3.encode("utf-8"))
+    proposed = l3_result.strip()
+    after_bytes = len(proposed.encode("utf-8"))
+
+    if (before_bytes > _MEMORY_SHRINKAGE_MIN_EXISTING_BYTES
+            and after_bytes < before_bytes * _MEMORY_SHRINKAGE_REFUSE_RATIO):
+        return json.dumps({
+            "l3_written": False,
+            "problem_id": problem_id,
+            "reason": "suspicious_shrinkage",
+            "before_bytes": before_bytes,
+            "proposed_bytes": after_bytes,
+            "message": "子 agent 产出的新内容不到旧内容 30%，疑似坍塌，已拒绝覆盖。",
+        }, ensure_ascii=False)
+
+    changed = proposed != existing_l3.strip()
+    # Write the stripped form so reported after_bytes matches the file on disk.
+    memory_path.write_text(proposed, encoding="utf-8")
+    return json.dumps({
+        "l3_written": True,
+        "problem_id": problem_id,
+        "changed": changed,
+        "before_bytes": before_bytes,
+        "after_bytes": after_bytes,
+    }, ensure_ascii=False)

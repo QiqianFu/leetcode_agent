@@ -63,7 +63,7 @@ SYSTEM_PROMPT = """\
 - `list_hot_problems(tag, difficulty, company, limit, randomize)` — CodeTop 高频题列表，自动过滤用户已做。未传参数会 fallback 到 /config，返回 `used_filters` 告知实际应用的筛选
 
 **用户交互**
-- `let_user_pick(choices, prompt)` — 把候选列表展示给用户，箭头选择器返回 `selected_id`
+- `let_user_pick(choices, prompt)` — 把候选展示给用户，箭头选择器返回 `selected_id`。适合候选势均力敌、或用户显得想自选时；有明显最优推荐直接 start_problem 即可
 
 **开题与代码**
 - `start_problem(id)` — 重型复合动作：拉题 + AI 分类 + 建 solution 文件 + 建 memory 文件 + 注册 DB
@@ -76,11 +76,16 @@ SYSTEM_PROMPT = """\
 - `read_memory(id)` — 读 L3 题目记忆文件
 - `write_memory(id, content, mode)` — 手动写 L3 记忆（你提供具体 content）
 - `analyze_and_memorize(id)` — 触发子 agent 从对话上下文生成 L3 做题总结（内容由子 agent 决定）
-- `update_user_memory()` — 触发子 agent 从对话上下文合并更新 L2 用户偏好（零参数）
+- `update_user_memory(hint?)` — 触发子 agent 从对话上下文合并更新 L2 用户偏好；可选 `hint` 引导子 agent 重点
 - `find_similar_problems(id)` — 子 agent 从用户已做题中挑算法相似的题，返回它们的 L3 记忆
 
 **外部**
 - `web_search(query, max_results)` — 联网搜索
+
+## 产品核心行为（刚性规则）
+以下是本应用的产品身份行为，**不是"工具自主推理"的范畴，必须触发**：
+- 每次 `start_problem` 成功后、给用户最终回复前，调用 `find_similar_problems(problem_id)`，让用户看到算法思路相似的过往做题记忆——这是本应用"跨题记忆辅导"的核心价值
+- 若 `find_similar_problems` 返回的 `similar_problems` 为空数组（用户做的题太少 / 子 agent 找不到合适的 / `reason: subagent_hallucinated`），无需在回复里强调相似题，正常讲解新题即可
 
 ## 记忆系统
 - **L1**: 工作区 `LeetCode.md`（用户手写指令，若存在会自动附在本 prompt 末尾）
@@ -116,6 +121,7 @@ class Agent:
             raise SystemExit(1)
         self.client = _get_llm_client()
         self.messages: list[dict] = []
+        self._history_warned = False
 
     def chat(self, user_input: str):
         """Process user message through the agent loop."""
@@ -135,9 +141,13 @@ class Agent:
                 )
             logger.warning("history limit reached: %d messages", msg_count)
             return
-        # Warn when approaching the limit
+        # Warn once when crossing the threshold; re-arm if history shrinks back
+        # (e.g. after /clear). Use >= so increments larger than 1 don't skip.
         warning_threshold = int(MAX_AGENT_HISTORY_MESSAGES * HISTORY_WARNING_THRESHOLD)
-        if msg_count == warning_threshold:
+        if msg_count < warning_threshold:
+            self._history_warned = False
+        elif not self._history_warned:
+            self._history_warned = True
             remaining = MAX_AGENT_HISTORY_MESSAGES - msg_count
             console.print(
                 f"\n[yellow]💡 会话已使用 {msg_count}/{MAX_AGENT_HISTORY_MESSAGES} 条消息，"
@@ -162,6 +172,16 @@ class Agent:
                 console.print(f"[red]API 调用失败: {e}[/red]")
                 console.print("[yellow]请稍后重试，或使用 /clear 开启新会话。[/yellow]")
                 # Roll back entire turn — drop user msg + any partial assistant/tool msgs
+                del self.messages[pre_turn_count:]
+                return
+            except Exception as e:
+                # Non-retryable (BadRequestError, AuthError, context-too-long, etc.):
+                # roll back too — leaving orphan assistant.tool_calls without paired
+                # tool responses would make every subsequent request fail with 400.
+                logger.error("non-retryable error in chat: %s: %s",
+                             type(e).__name__, e)
+                console.print(f"[red]模型调用失败: {type(e).__name__}: {e}[/red]")
+                console.print("[yellow]本轮已回滚。如反复失败，请用 /clear 重置。[/yellow]")
                 del self.messages[pre_turn_count:]
                 return
             logger.debug("step %d | tokens: %s | tools: %s | response: %s",
@@ -276,23 +296,36 @@ class Agent:
 
         return "".join(parts)
 
-    def _summarize_session_context(self) -> bool:
-        """Check if there are memory files referenced in this session.
+    # Tools that persist artifacts to disk (so user data survives /clear).
+    _PERSISTENT_TOOLS = frozenset({
+        "write_memory",
+        "analyze_and_memorize",
+        "update_user_memory",
+        "append_solution",
+        "start_problem",  # creates solution + memory files
+    })
 
-        Returns True if any write_memory tool calls were made (meaning
-        user has persisted memories that survive /clear).
+    def _summarize_session_context(self) -> bool:
+        """Return True if any persistent tool was invoked this session.
+
+        Used to decide whether to tell the user their work survives /clear.
         """
         for msg in self.messages:
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
                     fn = tc.get("function", {})
-                    if fn.get("name") == "write_memory":
+                    if fn.get("name") in self._PERSISTENT_TOOLS:
                         return True
         return False
 
     @staticmethod
     def _sanitize_messages(messages: list[dict]) -> list[dict]:
-        """Remove surrogate characters that break UTF-8 encoding."""
+        """Remove surrogate characters that break UTF-8 encoding.
+
+        Cleans both `content` and any tool_calls.function.arguments — user input
+        can flow into search keywords / write_memory content / etc., so surrogate
+        chars in tool arguments would break the same way as in plain content.
+        """
         def clean(s):
             if not isinstance(s, str):
                 return s
@@ -303,6 +336,19 @@ class Agent:
             msg = dict(msg)
             if "content" in msg and isinstance(msg["content"], str):
                 msg["content"] = clean(msg["content"])
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                cleaned_tcs = []
+                for tc in tool_calls:
+                    tc = dict(tc)
+                    fn = tc.get("function")
+                    if isinstance(fn, dict):
+                        fn = dict(fn)
+                        if isinstance(fn.get("arguments"), str):
+                            fn["arguments"] = clean(fn["arguments"])
+                        tc["function"] = fn
+                    cleaned_tcs.append(tc)
+                msg["tool_calls"] = cleaned_tcs
             sanitized.append(msg)
         return sanitized
 

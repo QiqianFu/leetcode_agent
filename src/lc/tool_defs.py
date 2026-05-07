@@ -6,7 +6,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "check_problem",
-            "description": "本地 DB 快速检查某题是否已在用户记忆索引中（已开始过的题）。纯本地查询，不调用 LeetCode API。返回 has_memory + 元信息（若存在）。",
+            "description": "本地 DB 快速检查某题是否已在用户记忆索引中（已开始过的题）。纯本地查询，不调用 LeetCode API。返回 has_memory + 元信息（若存在）；当 has_memory=true 时还会返回 memory_file_exists 告知磁盘文件是否仍在（DB 索引可能因跨工作区或手动删除而过时）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -64,7 +64,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "read_solution",
-            "description": "读取用户的解题代码文件。可传 file_path 或 problem_id（二选一），传 problem_id 时自动查找文件。",
+            "description": "读取用户的解题代码文件。可传 file_path 或 problem_id（二选一），传 problem_id 时自动查找文件。返回 JSON：status=ok 时含 file_path/bytes/content；status=error 时含 message。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -78,7 +78,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "find_problem_file",
-            "description": "在当前工作区内按题号查找本地解题文件。只搜索当前 CLI 启动目录及其子目录，不查询 LeetCode 线上题库。",
+            "description": "在当前工作区内按题号查找本地解题文件。只搜索当前 CLI 启动目录及其子目录，不查询 LeetCode 线上题库。返回 JSON：found + file（首个匹配）+ total_matches；当多个文件匹配时还包含 all_files（说明分类器在不同时刻把同题分到了不同 category 目录）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -92,7 +92,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "append_solution",
-            "description": "将参考解法追加到用户的解题文件末尾（不会覆盖用户已有代码）。",
+            "description": "将参考解法追加到用户的解题文件末尾（不会覆盖用户已有代码）。要求 file_path 是 .py 解题文件（其它后缀返回 status=error）。若 content 已出现在文件中会返回 status=skipped_duplicate 不重复追加。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -107,7 +107,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "search_leetcode",
-            "description": "按英文关键词搜索 LeetCode 全站题库。返回候选列表 JSON，不触发 UI、不开始做题。英文关键词only。",
+            "description": "按英文关键词搜索 LeetCode 全站题库。返回候选列表 JSON，每条带 already_practiced 标志（是否已在用户 L3 记忆中）。不触发 UI、不开始做题。英文关键词only。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -139,7 +139,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "let_user_pick",
-            "description": "把若干候选题目展示给用户，触发箭头选择器让用户自选。返回用户选中的 selected_id。纯 UI 工具，不做数据筛选也不开始做题。",
+            "description": "把若干候选题目展示给用户，触发箭头选择器让用户自选。返回用户选中的 selected_id。纯 UI 工具，不做数据筛选也不开始做题。适合以下场景：候选里有 2-3 道难度/方向对用户都同等合适、难分高下；用户语气显示想自选（'给几道'、'列几个'、'让我挑'）；你对单一推荐不够自信、想让用户给个倾向信号。有明显最优推荐时直接 start_problem 即可，不必强制让用户选。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -166,7 +166,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "start_problem",
-            "description": "开始做指定题号的 LeetCode 题。重型复合动作：拉题面 + AI 分类 + 建 solution.py 和 memory.md + 注册 DB。执行后该题进入 L3 记忆索引（视为已开始）。",
+            "description": "开始做指定题号的 LeetCode 题。重型复合动作：拉题面 + AI 分类 + 建 solution.py 和 memory.md + 注册 DB。执行后该题进入 L3 记忆索引（视为已开始）。返回 state 字段：'created'（全新开题）/'resumed'（文件和记忆都已存在，说明用户之前做过，此时应优先 read_memory、read_solution 恢复上下文而不是当新题从头讲解）/'partial'（部分状态存在，可能用户手动删过文件）。同时返回 solution_preexisted/memory_preexisted/db_entry_preexisted/memory_has_l3_content/cross_workspace_db_overwrite 五个 bool 字段。cross_workspace_db_overwrite=true 表示之前 DB 索引指向另一个工作区的 memory_file，本次已被覆盖（其它工作区的 L3 索引会失效）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -180,7 +180,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "read_memory",
-            "description": "读取指定题目的 L3 记忆文件原始内容（markdown）。未开始过的题会返回错误。",
+            "description": "读取指定题目的 L3 记忆文件。返回 JSON：content（原始 markdown）、has_l3_content（是否有实质内容，False 表示只有初始模板没有做题总结）、bytes。未开始过的题会返回 status=error。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -194,7 +194,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "write_memory",
-            "description": "写入或追加内容到某道题的 L3 记忆文件。你需要自己决定 content 的具体内容（区别于 analyze_and_memorize，那个由子 agent 自动生成）。",
+            "description": "写入或追加内容到某道题的 L3 记忆文件。你需要自己决定 content 的具体内容（区别于 analyze_and_memorize，那个由子 agent 自动生成）。append 模式下若 content 已存在于文件会返回 status=skipped_duplicate 不重复追加；overwrite 模式返回 before_bytes/after_bytes 让你确认改动规模。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -225,7 +225,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "update_user_memory",
-            "description": "触发子 agent 读取当前对话上下文，从中提取用户偏好（编码风格、辅导偏好、薄弱点、已掌握模式等），合并进 L2 用户偏好记忆文件。可选传 hint 给子 agent 一个额外提示。",
+            "description": "触发子 agent 读取当前对话上下文，从中提取用户偏好（编码风格、辅导偏好、薄弱点、已掌握模式等），合并进 L2 用户偏好记忆文件。可选传 hint 给子 agent 一个额外提示。返回 JSON，包含 status（updated/failed/refused）、changed、before_bytes/after_bytes。若子 agent 产出远小于现有内容会自动拒写（status=refused, reason=suspicious_shrinkage）保护用户数据。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -254,7 +254,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "analyze_and_memorize",
-            "description": "为指定题目生成并写入 L3 做题总结。子 agent 会读取当前对话上下文（你的提示、用户代码、发现的错误等）自动生成总结内容。默认 section 为 解题思路/踩坑记录/关键收获/复杂度，可通过 sections 参数覆盖。",
+            "description": "为指定题目生成并写入 L3 做题总结。子 agent 会读取当前对话上下文（你的提示、用户代码、发现的错误等）自动生成总结内容。默认 section 为 解题思路/踩坑记录/关键收获/复杂度，可通过 sections 参数覆盖。返回 JSON 含 l3_written、changed、before_bytes/after_bytes。若子 agent 产出远小于现有内容会自动拒写（reason=suspicious_shrinkage）保护已有的 L3 总结。",
             "parameters": {
                 "type": "object",
                 "properties": {

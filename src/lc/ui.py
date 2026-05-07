@@ -49,6 +49,7 @@ def arrow_select(choices: list[tuple[str, any]], load_more=None) -> any | None:
         return _arrow_select_windows(choices, load_more=load_more)
     import tty
     import termios
+    import select
 
     flush_stdin()
 
@@ -93,9 +94,19 @@ def arrow_select(choices: list[tuple[str, any]], load_more=None) -> any | None:
 
             if ch == "q" or ch == "\x1b":
                 if ch == "\x1b":
+                    # Distinguish plain Esc from arrow key sequences. In raw mode
+                    # read(1) blocks indefinitely, so we must poll first — if
+                    # nothing arrives within 50ms we treat it as a lone Esc press.
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if not rlist:
+                        # Plain Escape — user wants to cancel
+                        _clear()
+                        sys.stdout.flush()
+                        return None
                     next1 = sys.stdin.read(1)
                     if next1 == "[":
-                        next2 = sys.stdin.read(1)
+                        rlist2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                        next2 = sys.stdin.read(1) if rlist2 else ""
                         if next2 == "A":  # Up
                             selected = max(0, selected - 1)
                         elif next2 == "B":  # Down
@@ -103,7 +114,7 @@ def arrow_select(choices: list[tuple[str, any]], load_more=None) -> any | None:
                         else:
                             pass
                     else:
-                        # Plain Escape
+                        # Esc + non-bracket (e.g. function key) — treat as cancel
                         _clear()
                         sys.stdout.flush()
                         return None
@@ -136,7 +147,7 @@ def arrow_select(choices: list[tuple[str, any]], load_more=None) -> any | None:
 
 
 def _arrow_select_windows(choices: list[tuple[str, any]], load_more=None) -> any | None:
-    """Windows fallback: numbered prompt instead of arrow keys."""
+    """Windows fallback: numbered prompt with re-prompt on invalid input."""
     while True:
         for i, (label, _) in enumerate(choices):
             print(f"  {i + 1}. {label}")
@@ -147,18 +158,23 @@ def _arrow_select_windows(choices: list[tuple[str, any]], load_more=None) -> any
         hint += " (q 跳过): "
         try:
             raw = input(hint).strip()
-            if raw.lower() == "q" or not raw:
-                return None
-            if raw.lower() == "n" and load_more:
-                new_choices = load_more()
-                if new_choices:
-                    choices.extend(new_choices)
-                else:
-                    load_more = None
-                continue
+        except EOFError:
+            return None
+
+        if raw.lower() == "q" or not raw:
+            return None
+        if raw.lower() == "n" and load_more:
+            new_choices = load_more()
+            if new_choices:
+                choices.extend(new_choices)
+            else:
+                load_more = None
+            continue
+        try:
             idx = int(raw) - 1
-            if 0 <= idx < len(choices):
-                return choices[idx][1]
-        except (ValueError, EOFError):
-            pass
-        return None
+        except ValueError:
+            print("  [输入无效，请输入编号或 q 跳过]")
+            continue
+        if 0 <= idx < len(choices):
+            return choices[idx][1]
+        print(f"  [编号超出范围 1-{len(choices)}]")
